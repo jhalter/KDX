@@ -34,6 +34,7 @@ struct ClientView: View {
     @State private var error: String?
     @State private var viewingHistory = false
     @State private var viewingConnections = false
+    @State private var browsingTrackers = false
     @State private var editingServerSettings = false
     @State private var viewingGreeting = false
     @State private var inspectingFile: FileInspection?
@@ -150,6 +151,7 @@ struct ClientView: View {
                         HStack { if client.isConnecting { ProgressView().controlSize(.small) }; Text(client.isConnecting ? "Connecting…" : "Connect").frame(maxWidth: .infinity) }
                     }.buttonStyle(.borderedProminent).disabled(client.isConnecting || !tableReady).keyboardShortcut(.defaultAction)
                     if client.isConnecting { Button("Cancel") { client.disconnect() } }
+                    Button("Browse Trackers…", systemImage: "network") { browsingTrackers = true }.disabled(client.isConnecting || !tableReady)
                     Spacer()
                     Label(tableReady ? "Challenge table ready" : "Import a KDX challenge table", systemImage: tableReady ? "checkmark.seal" : "key")
                         .font(.caption).foregroundStyle(.secondary)
@@ -180,6 +182,9 @@ struct ClientView: View {
         }
         .onChange(of: client.isConnected) { _, connected in
             if !connected { roomDrafts = [:]; privateDrafts = [:]; recipient = nil }
+        }
+        .sheet(isPresented: $browsingTrackers) {
+            TrackerBrowserView { address, number in host = address; port = String(number); login = ""; password = "" }
         }
         .sheet(isPresented: $viewingConnections) { ConnectionMonitorView(client: client) }
         .sheet(isPresented: $viewingHistory) { ServerHistoryView(client: client) }

@@ -134,12 +134,13 @@ extension ByteTransport {
         bytes += try await read(remaining)
         return try Hello(wire: bytes)
     }
-    func authenticateClient(name: [UInt8], key: AccountKey, table: ChallengeTable) async throws {
+    func authenticateClient(name: [UInt8], key: AccountKey, table: ChallengeTable, expectedVersion: UInt8? = nil) async throws {
         let timeout = Task { [weak self] in try? await Task.sleep(for: self?.handshakeTimeout ?? .seconds(15)); if !Task.isCancelled { self?.close() } }
         defer { timeout.cancel() }
         let hello = Hello(server: false, name: name)
         try await write(hello.encode())
         let server = try await receiveHello()
+        if let expectedVersion, server.version != expectedVersion { throw KDXError.invalid("The endpoint is not the expected KDX service. Check its address and port.") }
         guard server.nonce != hello.nonce else { throw KDXError.authentication }
         try await write(Proof(key: key, nonce: server.nonce, response: table.response(server.challenge)).encode())
         try Proof(wire: await read(44)).verify(key: key, nonce: hello.nonce, response: table.response(hello.challenge))
