@@ -280,17 +280,19 @@ public struct ServerLog: Identifiable, Sendable {
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files.list(RemotePath(wire: b).names)), transaction: tx, reply: true)
         case 412:
             try requirePrivilege(10, peer: parent)
-            try b.require(24)
-            guard b[23] == 0, b.u64(8) == 0 else { throw KDXError.remote(0x10004) }
-            let path = try RemotePath(wire: Array(b.dropFirst(24)))
+            let request = try DownloadRequest(wire: b)
+            guard request.options == 0, request.resourceOffset == 0 else { throw KDXError.remote(0x10004) }
+            let path = request.path
             let (handle, size) = try files.openFile(path.names)
             defer { try? handle.close() }
-            let offset = min(size, b.u64(0) & ~UInt64(4095))
+            let offset = request.alignedOffset(size: size)
             guard size - offset <= UInt32.max else { throw KDXError.invalid("File is too large for a KDX transfer.") }
-            let name = try shortText(path.names.last ?? "")
-            var info = [UInt8](repeating: 0, count: 76)
-            info.put(size, at: 0); info.put(UInt32(1), at: 48); info[72] = UInt8(name.count); info += name
-            try await wire.send(type: 413, payload: info, transaction: tx, reply: true)
+            var info = DownloadInfo(dataSize: size, name: path.names.last ?? "")
+            var attributes = stat()
+            guard fstat(handle.fileDescriptor, &attributes) == 0 else { throw POSIXError(.EIO) }
+            info.created = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_birthtimespec.tv_sec) + Double(attributes.st_birthtimespec.tv_nsec)/1_000_000_000))
+            info.modified = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_mtimespec.tv_sec) + Double(attributes.st_mtimespec.tv_nsec)/1_000_000_000))
+            try await wire.send(type: 413, payload: info.encode(), transaction: tx, reply: true)
             try handle.seek(toOffset: offset)
             try await wire.sendFile(type: 414, length: UInt32(size-offset), source: handle, transaction: tx, reply: true)
             try await wire.sendFile(type: 414, length: 0, source: nil)

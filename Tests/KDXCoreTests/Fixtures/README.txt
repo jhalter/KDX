@@ -14,3 +14,8 @@ and account lists. The 58336 session uses the public lab password
 probe-35844.*.bin uses the same reference commit, license, and public lab
 password. It independently captures chat join, chat text, topic changes,
 and chat info. probe-50770 also includes the reference room list.
+
+probe-33068/33082, probe-53514/53518, and probe-56346/56352 use the same
+reference commit and license. They cover full, offset-5000, and EOF
+downloads. Parent sessions use the public lab password; attachment keys
+come from their parents' captured 105 Server Info records.

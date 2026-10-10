@@ -27,14 +27,14 @@ public struct NewsPost: Codable, Identifiable, Sendable {
         let author = try shortText(author), login = try shortText(login), subject = try shortText(subject), body = Array(body.utf8)
         guard body.count <= 65535 else { throw KDXError.invalid("News body exceeds protocol limits.") }
         var b = [UInt8](repeating: 0, count: 32)
-        b.put(UInt64(max(0, date.timeIntervalSince1970 * 1000)), at: 0); b.put(groupID, at: 8); b.put(id, at: 12)
+        b.put(KDXTime.encode(date), at: 0); b.put(groupID, at: 8); b.put(id, at: 12)
         b.put(UInt16(body.count), at: 24); b[28] = UInt8(author.count); b[29] = UInt8(login.count); b[30] = UInt8(subject.count)
         b += author + login + subject + body; b.pad(4); return b
     }
     static func decode(_ b: [UInt8]) throws -> (NewsPost, Int) {
         try b.require(32)
         let a = Int(b[28]), l = Int(b[29]), s = Int(b[30]), n = Int(b.u16(24)); try b.require(32+a+l+s+n)
-        return (NewsPost(id: b.u32(12), groupID: b.u32(8), date: Date(timeIntervalSince1970: Double(b.u64(0))/1000), author: b.text(32..<32+a), login: b.text(32+a..<32+a+l), subject: b.text(32+a+l..<32+a+l+s), body: b.text(32+a+l+s..<32+a+l+s+n)), (32+a+l+s+n+3) & ~3)
+        return (NewsPost(id: b.u32(12), groupID: b.u32(8), date: KDXTime.decode(b.u64(0)), author: b.text(32..<32+a), login: b.text(32+a..<32+a+l), subject: b.text(32+a+l..<32+a+l+s), body: b.text(32+a+l+s..<32+a+l+s+n)), (32+a+l+s+n+3) & ~3)
     }
     static func decodeList(_ b: [UInt8]) throws -> [NewsPost] {
         try b.require(16); guard b.u32(12) <= UInt32(b.count / 32) else { throw KDXError.invalid("Invalid news count.") }

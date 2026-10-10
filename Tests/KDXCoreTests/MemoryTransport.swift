@@ -9,8 +9,12 @@ import Foundation
     private var pending: (Int, CheckedContinuation<[UInt8], Error>)?
     private var closed = false
     static func pair() -> (WireConnection, WireConnection) {
-        let a = MemoryTransport(), b = MemoryTransport(); a.peer = b; b.peer = a
+        let (a, b) = endpoints()
         return (WireConnection(transport: a), WireConnection(transport: b))
+    }
+    static func endpoints() -> (MemoryTransport, MemoryTransport) {
+        let a = MemoryTransport(), b = MemoryTransport(); a.peer = b; b.peer = a
+        return (a, b)
     }
     func start() async throws { if closed { throw KDXError.disconnected } }
     func read(_ count: Int) async throws -> [UInt8] {

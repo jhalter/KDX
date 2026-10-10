@@ -13,7 +13,7 @@ public struct RemoteFile: Identifiable, Sendable {
         var at = 4, files = [RemoteFile]()
         for _ in 0..<b.u32(0) {
             try b.require(at+56); let n = Int(b[at+53]), k = Int(b[at+54]); try b.require(at+56+n+k)
-            files.append(RemoteFile(name: b.text(at+56..<at+56+n), size: b.u64(at), isDirectory: b.u32(at+32) & 2 != 0, modified: Date(timeIntervalSince1970: Double(b.u64(at+16)) / 1000)))
+            files.append(RemoteFile(name: b.text(at+56..<at+56+n), size: b.u64(at), isDirectory: b.u32(at+32) & 2 != 0, modified: KDXTime.decode(b.u64(at+16))))
             at += min((56+n+k+3) & ~3, b.count-at)
         }
         return files
@@ -24,7 +24,7 @@ public struct RemoteFile: Identifiable, Sendable {
         for file in files {
             let name = try shortText(file.name)
             var b = [UInt8](repeating: 0, count: 56)
-            b.put(file.size, at: 0); b.put(UInt64(max(0, file.modified.timeIntervalSince1970 * 1000)), at: 16)
+            b.put(file.size, at: 0); b.put(KDXTime.encode(file.modified), at: 16)
             b.put(UInt32(file.isDirectory ? 0x01000002 : 1), at: 32)
             b.put(UInt16(file.isDirectory ? 0xffff : 0), at: 46); b[52] = 4; b[53] = UInt8(name.count)
             out += b + name; out.pad(4)

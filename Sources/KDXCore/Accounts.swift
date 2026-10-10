@@ -213,5 +213,5 @@ public struct ServerAccount: Codable, Identifiable, Equatable, Sendable {
         modified = Self.now; if creating { created = modified }
     }
     // The reference's timestamp samples fit milliseconds since 1900 (epoch remains inferred upstream).
-    static var now: UInt64 { UInt64((Date().timeIntervalSince1970 + 2_208_988_800) * 1000) }
+    static var now: UInt64 { KDXTime.encode(Date()) }
 }

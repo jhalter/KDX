@@ -1,8 +1,8 @@
 import XCTest
 @testable import KDXCore
 
-func capturedMessages(_ name: String, password: String = "lab-only-pw!1") throws -> [Message] {
-    let cipher = SessionCipher(key: AccountKey(password: password))
+func capturedMessages(_ name: String, password: String = "lab-only-pw!1", key: AccountKey? = nil) throws -> [Message] {
+    let cipher = SessionCipher(key: key ?? AccountKey(password: password))
     var result = [Message]()
     for side in ["c2s", "s2c"] {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "\(name).\(side)", withExtension: "bin", subdirectory: "Fixtures"))

@@ -184,6 +184,7 @@ struct ClientView: View {
     }
     private func chooseDownload(_ file: RemoteFile) {
         let panel = NSSavePanel(); panel.nameFieldStringValue = file.name
+        panel.message = "Choose the same destination to resume an interrupted download."
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             perform { try await client.download(file, to: url) }
