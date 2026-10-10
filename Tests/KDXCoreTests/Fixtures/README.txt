@@ -37,5 +37,6 @@ python3 -I scripts/extract-capture.py /path/to/kdx/captures/linux-accounts-news.
 linux-chat-admin-37484/37478.*.bin was extracted from
 captures/linux-chat-admin.pcapng at the same reference commit and MIT license.
 Port 37484 creates the private room and sends invitations; 37478 receives them.
+They also capture broadcast delivery and a self-disconnection with its notice.
 Both use the public lab password. Reproduce each with scripts/extract-capture.py,
 the source pcapng, its client port, and the matching fixture output prefix.

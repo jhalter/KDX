@@ -14,6 +14,8 @@ import Observation
     public private(set) var chatWindow: ChatWindow?
     public private(set) var chatTopics: [UInt32: ChatTopic] = [:]
     public private(set) var chatInvitations: [ChatInvitation] = []
+    public private(set) var broadcasts: [BroadcastMessage] = []
+    public private(set) var disconnectNotice: DisconnectNotice?
     private var joining: UUID?
     public private(set) var lastError: String?
     public private(set) var accounts: [AccountListEntry] = []
@@ -28,6 +30,7 @@ import Observation
     private final class CheckedOperation {
         var error: Error?
         var confirmed = false
+        var disconnectingSelf = false
         let deletedLogin: String?
         init(deletedLogin: String?) { self.deletedLogin = deletedLogin }
     }
@@ -57,7 +60,7 @@ import Observation
     }
     func connect(wire: WireConnection, login: String, password: String, nickname: String, info: String = "", table: ChallengeTable) async throws {
         disconnect()
-        self.table = table; sessionLogin = login
+        self.table = table; sessionLogin = login; disconnectNotice = nil; broadcasts = []
         connection = wire; isConnecting = true; state = "Connecting…"; lastError = nil
         do {
             try await wire.start()
@@ -159,6 +162,15 @@ import Observation
     }
     public func setStatus(_ status: UInt8) async throws {
         try await sendChecked(type: 110, payload: [status,0,0,0])
+    }
+    public func sendBroadcast(_ text: String) async throws {
+        guard !text.isEmpty else { throw KDXError.invalid("Enter a broadcast message.") }
+        try await sendChecked(type: 154, payload: BroadcastMessage(text: text).encode(received: false))
+    }
+    public func disconnectUser(id: UInt32, reason: String = "", quietly: Bool = false) async throws {
+        guard !(quietly && id == serverInfo?.userID) else { throw KDXError.invalid("Self-disconnection requires a notice to confirm completion.") }
+        let request = DisconnectRequest(userID: id, options: quietly ? 1 : 0, reason: reason)
+        try await sendChecked(type: 150, payload: request.encode())
     }
     public func userInformation(id: UInt32) async throws -> UserInformation {
         let response = try await request(type: 152, payload: id.beBytes)
@@ -352,6 +364,7 @@ import Observation
         guard let connection else { throw KDXError.disconnected }
         let tx = connection.allocateTransaction()
         let operation = CheckedOperation(deletedLogin: type == 508 ? String(bytes: payload, encoding: .utf8) : nil)
+        operation.disconnectingSelf = type == 150 && payload.count >= 4 && payload.u32(0) == serverInfo?.userID
         checkedOperations[tx] = operation
         defer { if checkedOperations[tx] === operation { checkedOperations.removeValue(forKey: tx) } }
         do {
@@ -359,7 +372,7 @@ import Observation
             // KDX mutations often have no success reply. This round trip is an ordering barrier.
             _ = try await request(type: 115)
         } catch {
-            // Deleting one's own account closes the session after the explicit 515 notification.
+            // Self-removal closes the session after its explicit 515 or 151 notification.
             if operation.confirmed && operation.error == nil { return }
             throw error
         }
@@ -450,6 +463,18 @@ import Observation
                 if let operation = checkedOperations[message.transaction] { operation.error = error }
                 else { lastError = error.localizedDescription }
             }
+        case 151:
+            let notice = try DisconnectNotice.decode(b)
+            if notice.senderID == serverInfo?.userID {
+                for operation in checkedOperations.values where operation.disconnectingSelf { operation.confirmed = true }
+            }
+            disconnectNotice = notice
+            disconnect(); lastError = notice.description
+        case 155:
+            var notice = try BroadcastMessage.decode(b, received: true)
+            notice.sender = users.first { $0.id == notice.senderID }?.nickname ?? "User \(notice.senderID)"
+            broadcasts.append(notice)
+            if broadcasts.count > 100 { broadcasts.removeFirst(broadcasts.count-100) }
         case 515:
             let login = b.text(0..<b.count); accounts.removeAll { $0.login == login }
             for operation in checkedOperations.values where operation.deletedLogin == login { operation.confirmed = true }

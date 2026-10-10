@@ -31,6 +31,9 @@ struct ClientView: View {
     @State private var newsBody = ""
     @State private var posting = false
     @State private var changingPassword = false
+    @State private var composingBroadcast = false
+    @State private var viewingBroadcasts = false
+    @State private var disconnectingUser: KDXUser?
     @State private var editingProfile = false
     @State private var inspectingUser: KDXUser?
     @State private var recipient: UInt32?
@@ -82,6 +85,15 @@ struct ClientView: View {
                         }.frame(maxHeight: 180)
                     }
                     Spacer()
+                    Button("Broadcast…", systemImage: "megaphone") { composingBroadcast = true }
+                    if let notice = client.broadcasts.last {
+                        Button { viewingBroadcasts = true } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label("Broadcasts (\(client.broadcasts.count))", systemImage: "megaphone.fill")
+                                Text("\(notice.sender): \(notice.text)").font(.caption).lineLimit(2)
+                            }
+                        }.buttonStyle(.plain)
+                    }
                     Button("My Profile…", systemImage: "person.crop.circle") { editingProfile = true }
                     Toggle("Away", isOn: Binding(get: { client.currentUser?.status == 1 }, set: { value in perform { try await client.setStatus(value ? 1 : 0) } }))
                     Button("Change Password…", systemImage: "key") { changingPassword = true }
@@ -114,6 +126,9 @@ struct ClientView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
         }
+        .sheet(isPresented: $composingBroadcast) { BroadcastComposer(client: client) }
+        .sheet(isPresented: $viewingBroadcasts) { BroadcastHistory(client: client) }
+        .sheet(item: $disconnectingUser) { DisconnectUserView(client: client, user: $0) }
         .sheet(isPresented: $editingProfile) { ProfileEditorView(client: client) }
         .sheet(item: $inspectingUser) { UserInformationView(client: client, user: $0) }
         .onChange(of: client.currentUser?.nickname) { _, value in if let value, client.isConnected { nickname = value } }
@@ -297,7 +312,10 @@ struct ClientView: View {
                     }
                         .contextMenu {
                             Button("User Information…") { inspectingUser = user }
-                            if user.id != client.serverInfo?.userID { Button("Private Message") { recipient = user.id } }
+                            if user.id != client.serverInfo?.userID {
+                                Button("Private Message") { recipient = user.id }
+                                Button("Disconnect User…", role: .destructive) { disconnectingUser = user }
+                            }
                         }
                 }.listStyle(.sidebar)
             }.frame(width: 190)

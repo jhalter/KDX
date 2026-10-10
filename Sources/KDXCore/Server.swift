@@ -244,6 +244,23 @@ public struct ServerLog: Identifiable, Sendable {
                 if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = updated }
                 await broadcast(type: 111, payload: user.id.beBytes + [b[0],0,0,0])
             }
+        case 150:
+            try requirePrivilege(41, peer: peers[id])
+            let request = try DisconnectRequest.decode(b)
+            if request.banSeconds != 0 { try requirePrivilege(43, peer: peers[id]); throw KDXError.remote(0x10004) }
+            guard let target = peers.values.first(where: { $0.user?.id == request.userID }) else { throw KDXError.remote(0x1000c) }
+            // The reference's address-based exception is not decoded; protected users remain protected.
+            guard !privileges(for: target).contains(42) else { throw KDXError.remote(0x10014) }
+            if request.options & 1 == 0 {
+                let notice = DisconnectNotice(senderID: user.id, reason: request.reason, sender: user.nickname)
+                do { try await target.wire.send(type: 151, payload: notice.encode()) } catch { target.wire.close() }
+            }
+            target.wire.close()
+            record("\(user.nickname) disconnected \(target.user?.nickname ?? "user")")
+        case 154:
+            try requirePrivilege(33, peer: peers[id])
+            var notice = try BroadcastMessage.decode(b, received: false); notice.senderID = user.id
+            await broadcast(type: 155, payload: try notice.encode(received: true))
         case 152:
             try requirePrivilege(40, peer: peers[id]); try b.require(4)
             guard let target = peers.values.first(where: { $0.user?.id == b.u32(0) }), let targetUser = target.user else { throw KDXError.remote(0x1000c) }
