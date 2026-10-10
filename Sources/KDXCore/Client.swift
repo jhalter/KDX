@@ -334,18 +334,14 @@ import Observation
         let store = try SharedFiles(path: source.deletingLastPathComponent().path)
         let (handle, size) = try store.openFile([source.lastPathComponent]); defer { try? handle.close() }
         guard size <= UInt32.max else { throw KDXError.invalid("The KDX transfer limit is 4 GiB.") }
-        let name = try shortText(source.lastPathComponent), path = try RemotePath(folder).encode()
-        guard path.count <= UInt16.max else { throw KDXError.invalid("Path is too long.") }
-        var payload = [UInt8](repeating: 0, count: 76)
-        payload.put(size, at: 0); payload.put(UInt16(path.count), at: 70); payload[72] = UInt8(name.count)
-        payload += name + path
-        let tx = try await wire.send(type: 415, payload: payload)
+        let request = UploadRequest(dataSize: size, name: source.lastPathComponent, folder: RemotePath(folder))
+        let tx = try await wire.send(type: 415, payload: request.encode())
         let reply = try await wire.receive(); try checkStatus(reply)
         guard reply.type == 416, reply.transaction == tx, reply.isReply else { throw KDXError.invalid("Unexpected upload reply.") }
-        try reply.payload.require(24); let rawOffset = reply.payload.u64(0)
-        guard rawOffset <= size else { throw KDXError.invalid("Invalid upload resume offset.") }
-        let offset = rawOffset & ~UInt64(4095)
+        let offset = try UploadReply(wire: reply.payload).alignedOffset(size: size)
         try handle.seek(toOffset: offset)
+        if offset > 0 { transferStatus = "Resuming upload of \(source.lastPathComponent)" }
+        transferProgress = size == 0 ? 1 : Double(offset)/Double(size)
         try await wire.sendFile(type: 417, length: UInt32(size-offset), source: handle) { value in if self.activeTransfer === wire { self.transferProgress = size == 0 ? 1 : Double(offset+value)/Double(size) } }
         try await wire.sendFile(type: 417, length: 0, source: nil)
         let complete = try await wire.receive(); try checkStatus(complete)

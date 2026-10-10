@@ -299,22 +299,19 @@ public struct ServerLog: Identifiable, Sendable {
             record("Downloaded \(path.names.joined(separator: "/"))")
         case 415:
             try requirePrivilege(11, peer: parent)
-            try b.require(76)
-            guard b[23] == 0, b.u64(8) == 0, b.u64(0) <= UInt32.max else { throw KDXError.remote(0x10004) }
-            let stringsEnd = 76 + (72..<76).reduce(0) { $0 + Int(b[$1]) }
-            let pathLength = Int(b.u16(70)); try b.require(stringsEnd + pathLength)
-            guard stringsEnd + pathLength == b.count else { throw KDXError.remote(0x1000a) }
-            let name = b.text(76..<76+Int(b[72]))
-            let folder = try RemotePath(wire: Array(b[stringsEnd..<stringsEnd+pathLength]))
-            let upload = try files.beginUpload(folder: folder.names, name: name)
-            var reply = [UInt8](repeating: 0, count: 24); reply.put(UInt64.max, at: 8)
-            try await wire.send(type: 416, payload: reply, transaction: tx, reply: true)
-            let length = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: b.u64(0))
-            guard length == b.u64(0) else { throw KDXError.invalid("Upload size did not match its metadata.") }
+            let request = try UploadRequest(wire: b)
+            guard request.options == 0, request.resourceSize == 0, request.dataSize <= UInt32.max else { throw KDXError.remote(0x10004) }
+            // Anonymous sessions cannot resume one another's files.
+            let owner = parent.account.map { $0.login + ":" + Data($0.key).base64EncodedString() }
+            let upload = try PartialUpload(files: files, request: request, owner: owner)
+            try await wire.send(type: 416, payload: UploadReply(dataOffset: upload.reportedOffset).encode(), transaction: tx, reply: true)
+            let remaining = request.dataSize - upload.offset
+            let length = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: remaining)
+            guard length == remaining else { throw KDXError.remote(0x40074) }
             _ = try await wire.receiveFile(type: 417, sink: nil, maximum: 0)
             try upload.commit()
             try await wire.send(type: 418)
-            record("Uploaded \(name)")
+            record("Uploaded \(request.strings[0])")
         default: throw KDXError.remote(0x10004)
         }
     }

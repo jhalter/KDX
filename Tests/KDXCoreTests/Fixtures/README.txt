@@ -19,3 +19,7 @@ probe-33068/33082, probe-53514/53518, and probe-56346/56352 use the same
 reference commit and license. They cover full, offset-5000, and EOF
 downloads. Parent sessions use the public lab password; attachment keys
 come from their parents' captured 105 Server Info records.
+
+probe-48784/48796 use the same reference commit and license. They cover
+upload metadata, resume reply, both data records, and completion. The
+attachment key comes from the parent session's 105 Server Info record.

@@ -33,7 +33,7 @@ public struct RemoteFile: Identifiable, Sendable {
         return out
     }
 }
-struct RemotePath {
+struct RemotePath: Equatable {
     let names: [String]
     init(_ names: [String]) { self.names = names }
     static func validateName(_ name: String) throws {

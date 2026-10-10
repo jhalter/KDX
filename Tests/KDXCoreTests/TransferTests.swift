@@ -12,6 +12,7 @@ import Darwin
     private(set) var largeReadCount = 0
     private(set) var largeWriteCount = 0
     private(set) var readByteCount = 0
+    private(set) var writeByteCount = 0
     var peerHost: String { base.peerHost }
     var endpointDescription: String { base.endpointDescription }
     init(_ base: MemoryTransport, blockAfterLargeReads: Int? = nil, blockAfterLargeWrites: Int? = nil) {
@@ -33,7 +34,7 @@ import Darwin
             if largeWriteCount == blockAfterLargeWrites { isBlocked = true; try await withCheckedThrowingContinuation { waiter = $0 } }
             largeWriteCount += 1
         }
-        try await base.write(bytes)
+        try await base.write(bytes); writeByteCount += bytes.count
     }
     func releaseClose() { waiter?.resume(throwing: KDXError.disconnected); waiter = nil }
     func close() { if !delayClose { releaseClose() }; base.close() }
@@ -169,10 +170,10 @@ final class TransferTests: XCTestCase {
         do { try await current.value; XCTFail("Cancelled download completed") } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
         XCTAssertNil(client.transferStatus); XCTAssertTrue(client.isConnected)
     }
-    @MainActor func testCancelledUploadRemovesPartialServerFileAndLeavesSessionUsable() async throws {
+    @MainActor func testCancelledUploadResumesAfterServerRestartAndLeavesSessionUsable() async throws {
         let shared = try temporaryDirectory(), local = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: shared); try? FileManager.default.removeItem(at: local) }
-        let source = local.appendingPathComponent("source.bin"); try Data(repeating: 9, count: 131111).write(to: source)
+        let source = local.appendingPathComponent("source.bin"); try Data((0..<131111).map { UInt8(truncatingIfNeeded: ($0 &* 17) ^ ($0 >> 8)) }).write(to: source)
         let table = ChallengeTable(testBytes: [UInt8](repeating: 13, count: 1739))
         var config = ServerConfiguration(); config.sharedFolder = shared.path; config.accounts = [ServerAccount(login: "member", password: "pw")]
         let server = KDXServer(configuration: config), client = KDXClient()
@@ -188,9 +189,75 @@ final class TransferTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: shared.appendingPathComponent("source.bin").path))
         client.cancelTransfer()
         do { try await transfer.value; XCTFail("Cancelled upload completed") } catch {}
-        try await eventually { (try? FileManager.default.contentsOfDirectory(atPath: shared.path).isEmpty) == true }
         let pong = try await client.request(type: 108)
         XCTAssertEqual(pong.type, 109); XCTAssertNil(client.transferStatus)
+        XCTAssertTrue(try SharedFiles(path: shared.path).list([]).isEmpty, "Partial uploads must stay out of file listings")
+        client.disconnect(); server.stop()
+        let restarted = KDXServer(configuration: config)
+        defer { restarted.stop() }
+        try await connect(client, server: restarted, table: table)
+        var resumed: TransferGate?
+        client.setTransferFactory {
+            let (a,b) = MemoryTransport.endpoints(); let value = TransferGate(a); resumed = value
+            restarted.accept(wire: WireConnection(transport: b), table: table); return WireConnection(transport: value)
+        }
+        try await client.upload(from: source)
+        XCTAssertEqual(try Data(contentsOf: shared.appendingPathComponent("source.bin")), try Data(contentsOf: source))
+        XCTAssertLessThan(try XCTUnwrap(resumed?.writeByteCount), 131111 - 65536 + 1000)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: shared.appendingPathComponent(".kdx-uploads").path).isEmpty)
+        do { try await client.upload(from: source); XCTFail("Existing file overwritten") }
+        catch KDXError.remote(let code) { XCTAssertEqual(code, 0x30073) }
+        XCTAssertEqual(try Data(contentsOf: shared.appendingPathComponent("source.bin")), try Data(contentsOf: source))
+    }
+    func testUploadCheckpointsAreLockedAccountIsolatedAndResetForChangedMetadata() throws {
+        let shared = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: shared) }
+        let files = try SharedFiles(path: shared.path)
+        let request = UploadRequest(dataSize: 10000, name: "upload.bin", folder: RemotePath([]))
+        do {
+            let first = try PartialUpload(files: files, request: request, owner: "alice")
+            try first.handle.write(contentsOf: Data(repeating: 1, count: 5001))
+            XCTAssertThrowsError(try PartialUpload(files: files, request: request, owner: "alice"))
+            let other = try PartialUpload(files: files, request: request, owner: "bob")
+            XCTAssertEqual(other.offset, 0)
+        }
+        do {
+            let resumed = try PartialUpload(files: files, request: request, owner: "alice")
+            XCTAssertEqual(resumed.reportedOffset, 5001); XCTAssertEqual(resumed.offset, 4096)
+            XCTAssertEqual(try resumed.handle.offset(), 4096)
+            XCTAssertEqual(try UploadReply(dataOffset: resumed.reportedOffset).alignedOffset(size: request.dataSize), 4096)
+        }
+        do {
+            var changed = request; changed.dataSize = 20000
+            let reset = try PartialUpload(files: files, request: changed, owner: "alice")
+            XCTAssertEqual(reset.offset, 0)
+        }
+        let directory = shared.appendingPathComponent(".kdx-uploads")
+        let before = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        do {
+            let guest = try PartialUpload(files: files, request: request, owner: nil)
+            try guest.handle.write(contentsOf: Data(repeating: 2, count: 5000))
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), before, "Anonymous partials have no persistent identity")
+        XCTAssertThrowsError(try UploadReply(dataOffset: 10001).alignedOffset(size: 10000))
+        try FileManager.default.removeItem(at: directory)
+        let outside = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: outside) }
+        try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: outside)
+        XCTAssertThrowsError(try PartialUpload(files: files, request: request, owner: "alice"))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
+    }
+    func testCapturedUploadRecords() throws {
+        let parent = try capturedMessages("probe-48784")
+        let info = try XCTUnwrap(parent.first { $0.type == 105 })
+        let messages = try capturedMessages("probe-48796", key: AccountKey(bytes: Array(info.payload.prefix(32))))
+        let requestBytes = try XCTUnwrap(messages.first { $0.type == 415 }?.payload)
+        let request = try UploadRequest(wire: requestBytes)
+        XCTAssertEqual(request.dataSize, 100); XCTAssertEqual(request.strings[0], "probe-ul.bin")
+        XCTAssertEqual(request.folder.names, ["Uploads [UL]"]); XCTAssertEqual(try request.encode(), requestBytes)
+        let replyBytes = try XCTUnwrap(messages.first { $0.type == 416 }?.payload)
+        let reply = try UploadReply(wire: replyBytes)
+        XCTAssertEqual(reply.dataOffset, 0); XCTAssertEqual(reply.resourceOffset, .max); XCTAssertEqual(reply.encode(), replyBytes)
+        XCTAssertEqual(messages.filter { $0.type == 417 }.map { $0.payload.count }, [100, 0])
+        XCTAssertEqual(try XCTUnwrap(messages.first { $0.type == 418 }?.payload), [])
     }
     @MainActor private func connect(_ client: KDXClient, server: KDXServer, table: ChallengeTable) async throws {
         let (a,b) = MemoryTransport.pair(); server.accept(wire: b, table: table)
