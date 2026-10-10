@@ -32,7 +32,7 @@ public struct AccountPrivileges: Codable, Equatable, Sendable {
         (33, "Send broadcasts"), (34, "Create private chats"), (37, "Manage chats"), (40, "View user information"), (41, "Disconnect users"), (42, "Cannot be disconnected remotely"),
         (50, "View accounts"), (51, "Create accounts"), (52, "Modify accounts"),
         (53, "Change own password"), (54, "Protect account from non-administrators"),
-        (60, "Use any nickname"), (61, "Modify server settings"), (70, "Read news"),
+        (60, "Use any nickname"), (61, "Modify server settings"), (62, "Skip greeting on login"), (70, "Read news"),
         (71, "Post news"), (72, "Delete any news post"), (73, "Manage newsgroups")
     ]
 }

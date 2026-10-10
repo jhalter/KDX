@@ -5,6 +5,10 @@ import Observation
 public struct ServerConfiguration: Codable, Equatable, Sendable {
     public var name = "My KDX Server"
     public var description = "Welcome to KDX"
+    public var greeting = ""
+    public var greetingEnabled = false
+    public var downloadLimit: UInt32 = 0
+    var settingsBlob: [UInt8]?
     public var port: UInt16 = 10700
     public var allowGuests = true
     public var accounts: [ServerAccount] = []
@@ -13,10 +17,14 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
     public var sharedFolder = ""
     public var newsFile = ""
     public init() {}
-    private enum CodingKeys: String, CodingKey { case name, description, port, allowGuests, accounts, accountClasses, chats, sharedFolder, newsFile }
+    private enum CodingKeys: String, CodingKey { case name, description, greeting, greetingEnabled, downloadLimit, settingsBlob, port, allowGuests, accounts, accountClasses, chats, sharedFolder, newsFile }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name); description = try c.decode(String.self, forKey: .description)
+        greeting = try c.decodeIfPresent(String.self, forKey: .greeting) ?? ""
+        greetingEnabled = try c.decodeIfPresent(Bool.self, forKey: .greetingEnabled) ?? false
+        downloadLimit = try c.decodeIfPresent(UInt32.self, forKey: .downloadLimit) ?? 0
+        settingsBlob = try c.decodeIfPresent([UInt8].self, forKey: .settingsBlob)
         port = try c.decode(UInt16.self, forKey: .port); allowGuests = try c.decode(Bool.self, forKey: .allowGuests)
         accounts = try c.decode([ServerAccount].self, forKey: .accounts)
         accountClasses = try c.decodeIfPresent([AccountClass].self, forKey: .accountClasses) ?? AccountClass.defaults
@@ -24,6 +32,11 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
         sharedFolder = try c.decodeIfPresent(String.self, forKey: .sharedFolder) ?? ""
         newsFile = try c.decodeIfPresent(String.self, forKey: .newsFile) ?? ""
         try validate()
+    }
+    func remoteSettings() throws -> RemoteServerSettings {
+        var settings = try settingsBlob.map { try RemoteServerSettings(wire: $0) } ?? RemoteServerSettings(name: name)
+        settings.name = name; settings.greeting = greeting; settings.greetingEnabled = greetingEnabled; settings.downloadLimit = downloadLimit
+        return settings
     }
     public func save(to url: URL) throws {
         try validate()
@@ -33,6 +46,7 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
     }
     public static func load(from url: URL) throws -> Self { try JSONDecoder().decode(Self.self, from: Data(contentsOf: url)) }
     func validate() throws {
+        _ = try remoteSettings().encode()
         _ = try shortText(name); _ = try shortText(description)
         guard !name.isEmpty, Set(accounts.map(\.login)).count == accounts.count else { throw KDXError.invalid("Server name is required and account logins must be unique.") }
         guard accounts.count <= 4096, accountClasses.count <= 32,
@@ -70,6 +84,8 @@ public struct ServerLog: Identifiable, Sendable {
     private var news = NewsStore()
     private var newsLoaded = false
     private var privateChats: [UInt32: (room: ChatRecord, owner: UInt32)] = [:]
+    private var activeDownloads: Set<ObjectIdentifier> = []
+    private let downloadLimiter = DownloadLimiter()
     private var nextInvitation: UInt32 = 1
     private var nextUser: UInt32 = 1
     private var chatTopics: [UInt32: ChatTopic] = [:]
@@ -138,6 +154,7 @@ public struct ServerLog: Identifiable, Sendable {
             do { news = try NewsStore(url: configuration.newsFile.isEmpty ? nil : URL(fileURLWithPath: configuration.newsFile)); newsLoaded = true }
             catch { lastError = error.localizedDescription; wire.close(); return }
         }
+        if downloadLimiter.rate != configuration.downloadLimit { downloadLimiter.setRate(configuration.downloadLimit) }
         let id = UUID()
         peers[id] = Peer(wire: wire)
         Task { await self.serve(id: id, wire: wire, table: table) }
@@ -225,6 +242,9 @@ public struct ServerLog: Identifiable, Sendable {
                 peers[id]?.loginTime = ServerAccount.now
                 let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: privileges(for: peers[id]).contains(61), sessionKey: peers[id]?.sessionKey ?? [])
                 try await wire.send(type: 105, payload: info.encode())
+                if configuration.greetingEnabled && !configuration.greeting.isEmpty && !privileges(for: peers[id]).contains(62) { try await wire.send(type: 107, payload: [0,0,0,0] + Array(configuration.greeting.utf8)) }
+                let icon = try configuration.remoteSettings().icon
+                if !icon.isEmpty { try await wire.send(type: 106, payload: icon) }
                 try await wire.send(type: 101, payload: KDXUser.encodeList(users))
                 record("\(user.nickname) connected")
             }
@@ -244,6 +264,33 @@ public struct ServerLog: Identifiable, Sendable {
                 if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = updated }
                 await broadcast(type: 111, payload: user.id.beBytes + [b[0],0,0,0])
             }
+        case 112:
+            let text = configuration.greeting.isEmpty ? "(No greeting.)" : configuration.greetingEnabled ? configuration.greeting : "(Greeting disabled.)"
+            try await wire.send(type: 107, payload: [0,0,0,0] + Array(text.utf8))
+        case 170:
+            try requirePrivilege(61, peer: peers[id])
+            try await wire.send(type: 171, payload: configuration.remoteSettings().encode(), transaction: tx, reply: true)
+        case 172:
+            try requirePrivilege(61, peer: peers[id])
+            var settings = try RemoteServerSettings(wire: b)
+            if settings.icon.isEmpty { settings.icon = try configuration.remoteSettings().icon }
+            var candidate = configuration
+            candidate.name = settings.name; candidate.greeting = settings.greeting; candidate.greetingEnabled = settings.greetingEnabled
+            candidate.downloadLimit = settings.downloadLimit; candidate.settingsBlob = try settings.encode()
+            let rateChanged = candidate.downloadLimit != configuration.downloadLimit
+            try commitConfiguration(candidate)
+            if rateChanged {
+                downloadLimiter.setRate(candidate.downloadLimit)
+                for peer in peers.values where activeDownloads.contains(ObjectIdentifier(peer.wire)) { peer.wire.close() }
+            }
+            try await wire.send(type: 173, transaction: tx, reply: true)
+            if rateChanged { await broadcast(type: 419, payload: configuration.downloadLimit.beBytes) }
+            for peer in peers.values.filter({ $0.user != nil }) {
+                let info = ServerInfo(name: configuration.name, description: configuration.description, userID: peer.user!.id, canModifySettings: privileges(for: peer).contains(61), sessionKey: peer.sessionKey)
+                _ = try? await peer.wire.send(type: 105, payload: info.encode())
+                _ = try? await peer.wire.send(type: 106, payload: settings.icon)
+            }
+            record("Updated server settings")
         case 150:
             try requirePrivilege(41, peer: peers[id])
             let request = try DisconnectRequest.decode(b)
@@ -299,6 +346,8 @@ public struct ServerLog: Identifiable, Sendable {
         case 400:
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files.list(RemotePath(wire: b).names)), transaction: tx, reply: true)
         case 412:
+            activeDownloads.insert(ObjectIdentifier(wire))
+            defer { activeDownloads.remove(ObjectIdentifier(wire)) }
             try requirePrivilege(10, peer: parent)
             let request = try DownloadRequest(wire: b)
             guard request.options == 0 else { throw KDXError.remote(0x10004) }
@@ -316,9 +365,10 @@ public struct ServerLog: Identifiable, Sendable {
             info.created = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_birthtimespec.tv_sec) + Double(attributes.st_birthtimespec.tv_nsec)/1_000_000_000))
             info.modified = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_mtimespec.tv_sec) + Double(attributes.st_mtimespec.tv_nsec)/1_000_000_000))
             try await wire.send(type: 413, payload: info.encode(), transaction: tx, reply: true)
+            if configuration.downloadLimit > 0 { try await parent.wire.send(type: 419, payload: configuration.downloadLimit.beBytes) }
             try handle.seek(toOffset: offset)
-            try await wire.sendFile(type: 414, length: UInt32(size-offset), source: handle, transaction: tx, reply: true)
-            try await wire.sendFile(type: 414, length: UInt32(resourceSize-resourceOffset), source: handle, resourceOffset: resourceOffset)
+            try await wire.sendFile(type: 414, length: UInt32(size-offset), source: handle, transaction: tx, reply: true, limiter: downloadLimiter)
+            try await wire.sendFile(type: 414, length: UInt32(resourceSize-resourceOffset), source: handle, resourceOffset: resourceOffset, limiter: downloadLimiter)
             record("Downloaded \(path.names.joined(separator: "/"))")
         case 415:
             try requirePrivilege(11, peer: parent)

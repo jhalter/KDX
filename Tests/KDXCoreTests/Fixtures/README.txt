@@ -44,3 +44,9 @@ the source pcapng, its client port, and the matching fixture output prefix.
 probe-54328.*.bin comes from the same reference commit and MIT license, with
 public lab password 'lab-only-pw!1'. It covers folder info and file lists.
 List re-encoding normalizes uninitialized padding, matching the Rust test.
+
+linux-server-settings-45150.*.bin was extracted from
+captures/linux-server-settings.pcapng at the same reference commit and MIT
+license, using scripts/extract-capture.py. It covers settings reads/writes,
+icon omission/retention, success acknowledgments, and explicit greetings.
+The password is the public lab-only value 'lab-only-pw!1'.

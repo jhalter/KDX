@@ -20,6 +20,8 @@ struct ClientView: View {
     @State private var password = ""
     @State private var draft = ""
     @State private var error: String?
+    @State private var editingServerSettings = false
+    @State private var viewingGreeting = false
     @State private var inspectingFile: FileInspection?
     @State private var importing = false
     @State private var tableReady = false
@@ -86,6 +88,8 @@ struct ClientView: View {
                         }.frame(maxHeight: 180)
                     }
                     Spacer()
+                    Button("Show Greeting…") { viewingGreeting = true }
+                    if client.serverInfo?.canModifySettings == true { Button("Server Settings…") { editingServerSettings = true } }
                     Button("Broadcast…", systemImage: "megaphone") { composingBroadcast = true }
                     if let notice = client.broadcasts.last {
                         Button { viewingBroadcasts = true } label: {
@@ -127,6 +131,9 @@ struct ClientView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
         }
+        .sheet(isPresented: $editingServerSettings) { ServerSettingsView(client: client) }
+        .sheet(isPresented: $viewingGreeting) { ServerGreetingView(client: client) }
+        .onChange(of: client.greeting) { old, value in if old == nil, value != nil { viewingGreeting = true } }
         .sheet(item: $inspectingFile) { FileInformationView(client: client, path: $0.path) }
         .sheet(isPresented: $composingBroadcast) { BroadcastComposer(client: client) }
         .sheet(isPresented: $viewingBroadcasts) { BroadcastHistory(client: client) }

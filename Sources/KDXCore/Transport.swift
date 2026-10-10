@@ -6,8 +6,13 @@ import Foundation
     var peerHost: String { get }
     func start() async throws
     func read(_ count: Int) async throws -> [UInt8]
+    func readSome(maximum: Int) async throws -> [UInt8]
     func write(_ bytes: [UInt8]) async throws
     func close()
+}
+
+extension ByteTransport {
+    func readSome(maximum: Int) async throws -> [UInt8] { try await read(maximum) }
 }
 
 /// Network.framework handles socket I/O; state and continuations are serialized on the main actor.
@@ -53,6 +58,16 @@ import Foundation
             }
         }
     }
+    func readSome(maximum: Int) async throws -> [UInt8] {
+        guard !closed, maximum > 0 else { throw KDXError.disconnected }
+        return try await withCheckedThrowingContinuation { continuation in
+            network.receive(minimumIncompleteLength: 1, maximumLength: maximum) { data, _, _, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let data, !data.isEmpty { continuation.resume(returning: Array(data)) }
+                else { continuation.resume(throwing: KDXError.disconnected) }
+            }
+        }
+    }
     func write(_ bytes: [UInt8]) async throws {
         guard !closed else { throw KDXError.disconnected }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -77,7 +92,16 @@ import Foundation
     convenience init(host: String, port: UInt16) throws { self.init(transport: try TCPTransport(host: host, port: port)) }
     func start() async throws { try await performIO(timeout: handshakeTimeout) { try await self.transport.start() } }
     func close() { guard !closed else { return }; closed = true; transport.close() }
-    func read(_ count: Int, timeout: Duration? = nil) async throws -> [UInt8] { try await performIO(timeout: timeout ?? ioTimeout) { try await self.transport.read(count) } }
+    func read(_ count: Int, timeout: Duration? = nil) async throws -> [UInt8] {
+        var bytes = [UInt8](); bytes.reserveCapacity(count)
+        while bytes.count < count {
+            let remaining = count - bytes.count
+            let part = try await performIO(timeout: timeout ?? ioTimeout) { try await self.transport.readSome(maximum: remaining) }
+            guard !part.isEmpty, part.count <= remaining else { throw KDXError.invalid("Invalid transport read length.") }
+            bytes += part
+        }
+        return bytes
+    }
     func write(_ bytes: [UInt8]) async throws { try await performIO(timeout: ioTimeout ?? .seconds(30)) { try await self.transport.write(bytes) } }
     private func performIO<T: Sendable>(timeout: Duration?, _ operation: @MainActor () async throws -> T) async throws -> T {
         try Task.checkCancellation()
@@ -136,7 +160,7 @@ import Foundation
         guard header.length <= (header.type == 608 ? newsLimit ?? limit : limit) else { throw KDXError.invalid("Message exceeds its protocol limit.") }
         return try await cipher.open(header, payload: read(header.paddedLength, timeout: .seconds(30)))
     }
-    func sendFile(type: UInt32, length: UInt32, source: FileHandle?, resourceOffset: UInt64? = nil, transaction: UInt32? = nil, reply: Bool = false, progress: (UInt64) -> Void = { _ in }) async throws {
+    func sendFile(type: UInt32, length: UInt32, source: FileHandle?, resourceOffset: UInt64? = nil, transaction: UInt32? = nil, reply: Bool = false, limiter: DownloadLimiter? = nil, progress: (UInt64) -> Void = { _ in }) async throws {
         guard let cipher else { throw KDXError.authentication }
         let tx = transaction ?? allocateTransaction()
         try await write(cipher.sealHeader(transaction: tx, type: type, reply: reply, length: length))
@@ -144,7 +168,8 @@ import Foundation
         var sent = 0
         while sent < Int(length) {
             try Task.checkCancellation()
-            let count = min(65536, Int(length) - sent)
+            let count = min(limiter?.chunkSize ?? 65536, Int(length) - sent)
+            try await limiter?.acquire(count, isClosed: { self.closed })
             guard let source else { throw KDXError.invalid("Missing transfer source.") }
             let bytes = try resourceOffset.map { try ResourceFork.read(source.fileDescriptor, offset: $0 + UInt64(sent), count: count) } ?? source.read(upToCount: count)
             guard let bytes, bytes.count == count else { throw KDXError.invalid("Source file ended before its advertised size.") }

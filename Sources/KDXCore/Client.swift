@@ -14,6 +14,9 @@ import Observation
     public private(set) var chatWindow: ChatWindow?
     public private(set) var chatTopics: [UInt32: ChatTopic] = [:]
     public private(set) var chatInvitations: [ChatInvitation] = []
+    public private(set) var greeting: String?
+    public private(set) var serverIcon: [UInt8] = []
+    public private(set) var serverDownloadLimit: UInt32 = 0
     public private(set) var broadcasts: [BroadcastMessage] = []
     public private(set) var disconnectNotice: DisconnectNotice?
     private var joining: UUID?
@@ -60,7 +63,7 @@ import Observation
     }
     func connect(wire: WireConnection, login: String, password: String, nickname: String, info: String = "", table: ChallengeTable) async throws {
         disconnect()
-        self.table = table; sessionLogin = login; disconnectNotice = nil; broadcasts = []
+        self.table = table; sessionLogin = login; greeting = nil; serverIcon = []; serverDownloadLimit = 0; disconnectNotice = nil; broadcasts = []
         connection = wire; isConnecting = true; state = "Connecting…"; lastError = nil
         do {
             try await wire.start()
@@ -163,6 +166,16 @@ import Observation
     public func setStatus(_ status: UInt8) async throws {
         try await sendChecked(type: 110, payload: [status,0,0,0])
     }
+    public func serverSettings() async throws -> RemoteServerSettings {
+        let reply = try await request(type: 170)
+        guard reply.type == 171 else { throw KDXError.invalid("Unexpected server-settings reply.") }
+        return try RemoteServerSettings(wire: reply.payload)
+    }
+    public func updateServerSettings(_ settings: RemoteServerSettings) async throws {
+        let reply = try await request(type: 172, payload: settings.encode())
+        guard reply.type == 173, reply.payload.isEmpty else { throw KDXError.invalid("Unexpected server-settings confirmation.") }
+    }
+    public func loadGreeting() async throws { try await sendChecked(type: 112, payload: []) }
     public func sendBroadcast(_ text: String) async throws {
         guard !text.isEmpty else { throw KDXError.invalid("Enter a broadcast message.") }
         try await sendChecked(type: 154, payload: BroadcastMessage(text: text).encode(received: false))
@@ -468,6 +481,11 @@ import Observation
                 if let operation = checkedOperations[message.transaction] { operation.error = error }
                 else { lastError = error.localizedDescription }
             }
+        case 106: serverIcon = b
+        case 107:
+            try b.require(4); greeting = b.text(4..<b.count)
+        case 419:
+            try b.require(4); serverDownloadLimit = b.u32(0)
         case 151:
             let notice = try DisconnectNotice.decode(b)
             if notice.senderID == serverInfo?.userID {

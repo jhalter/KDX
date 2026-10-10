@@ -38,6 +38,9 @@ struct ServerView: View {
                     Section("Server") {
                         TextField("Name", text: $configuration.name)
                         TextField("Description", text: $configuration.description)
+                        Toggle("Show greeting on login", isOn: $configuration.greetingEnabled)
+                        TextField("Greeting", text: $configuration.greeting, axis: .vertical).lineLimit(3...6)
+                        TextField("Total download limit (bytes/sec; 0 = unlimited)", value: $configuration.downloadLimit, format: .number)
                         TextField("TCP port", text: $port)
                         Toggle("Allow guest connections", isOn: $configuration.allowGuests)
                         LabeledContent("Shared folder") {
