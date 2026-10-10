@@ -21,7 +21,7 @@ final class PartialDownload {
     private let destination: String
     let handle: FileHandle
     private(set) var info: DownloadInfo?
-    let offset: UInt64
+    let offset: UInt64, resourceOffset: UInt64
     private struct Saved: Codable { let version: Int; let info: DownloadInfo }
     init(destination: URL, identity: DownloadIdentity) throws {
         try RemotePath.validateName(destination.lastPathComponent)
@@ -41,8 +41,11 @@ final class PartialDownload {
             guard fstat(dataFD, &attributes) == 0, attributes.st_mode & S_IFMT == S_IFREG, attributes.st_nlink == 1, attributes.st_uid == getuid() else { throw KDXError.invalid("Invalid partial download file.") }
             guard flock(dataFD, LOCK_EX | LOCK_NB) == 0 else { throw KDXError.invalid("This download is already running.") }
             let info = try Self.loadInfo(directory: directory, stem: stem)
-            if info == nil { guard ftruncate(dataFD, 0) == 0 else { throw POSIXError(.EIO) }; attributes.st_size = 0 }
+            if info == nil { guard ftruncate(dataFD, 0) == 0 else { throw POSIXError(.EIO) }; try ResourceFork.clear(dataFD); attributes.st_size = 0 }
             guard attributes.st_size >= 0, UInt64(attributes.st_size) <= (info?.dataSize ?? 0) else { throw KDXError.invalid("The partial download has an invalid size.") }
+            let resourceSize = try ResourceFork.size(dataFD)
+            guard resourceSize <= (info?.resourceSize ?? 0) else { throw KDXError.invalid("The partial resource fork has an invalid size.") }
+            self.resourceOffset = resourceSize == info?.resourceSize ? resourceSize : resourceSize & ~UInt64(4095)
             self.parent = parent; self.directory = directory; self.stem = stem; self.destination = destination.lastPathComponent
             self.handle = FileHandle(fileDescriptor: dataFD, closeOnDealloc: true); self.info = info
             let size = UInt64(attributes.st_size)

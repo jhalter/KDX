@@ -135,7 +135,7 @@ import Foundation
         let header = try cipher.header(await read(16), limit: limit)
         return try await cipher.open(header, payload: read(header.paddedLength, timeout: .seconds(30)))
     }
-    func sendFile(type: UInt32, length: UInt32, source: FileHandle?, transaction: UInt32? = nil, reply: Bool = false, progress: (UInt64) -> Void = { _ in }) async throws {
+    func sendFile(type: UInt32, length: UInt32, source: FileHandle?, resourceOffset: UInt64? = nil, transaction: UInt32? = nil, reply: Bool = false, progress: (UInt64) -> Void = { _ in }) async throws {
         guard let cipher else { throw KDXError.authentication }
         let tx = transaction ?? allocateTransaction()
         try await write(cipher.sealHeader(transaction: tx, type: type, reply: reply, length: length))
@@ -144,7 +144,9 @@ import Foundation
         while sent < Int(length) {
             try Task.checkCancellation()
             let count = min(65536, Int(length) - sent)
-            guard let bytes = try source?.read(upToCount: count), bytes.count == count else { throw KDXError.invalid("Source file ended before its advertised size.") }
+            guard let source else { throw KDXError.invalid("Missing transfer source.") }
+            let bytes = try resourceOffset.map { try ResourceFork.read(source.fileDescriptor, offset: $0 + UInt64(sent), count: count) } ?? source.read(upToCount: count)
+            guard let bytes, bytes.count == count else { throw KDXError.invalid("Source file ended before its advertised size.") }
             var plain = Array(bytes)
             while plain.count % 16 != 0 { plain.append(fill[plain.count % 4]) }
             var encrypted = [UInt8](); encrypted.reserveCapacity(plain.count)
@@ -152,10 +154,10 @@ import Foundation
             try await write(encrypted); sent += count; progress(UInt64(sent))
         }
     }
-    func receiveFile(type: UInt32, sink: FileHandle?, maximum: UInt64, transaction: UInt32? = nil, progress: (UInt64) -> Void = { _ in }) async throws -> UInt64 {
+    func receiveFile(type: UInt32, sink: FileHandle?, maximum: UInt64, resourceOffset: UInt64? = nil, transaction: UInt32? = nil, progress: (UInt64) -> Void = { _ in }) async throws -> UInt64 {
         guard let cipher else { throw KDXError.authentication }
         let header = try cipher.header(await read(16), limit: Int(UInt32.max))
-        guard header.type == type, transaction == nil || header.transaction == transaction, UInt64(header.length) <= maximum else { throw KDXError.invalid("Unexpected transfer data or size.") }
+        guard header.type == type, transaction == nil || (header.transaction == transaction && header.flags & 1 != 0), UInt64(header.length) <= maximum, header.length == 0 || sink != nil else { throw KDXError.invalid("Unexpected transfer data or size.") }
         var received = 0
         while received < header.length {
             try Task.checkCancellation()
@@ -163,7 +165,10 @@ import Foundation
             let encrypted = try await read(padded)
             var plain = [UInt8](); plain.reserveCapacity(padded)
             for at in stride(from: 0, to: padded, by: 16) { plain += cipher.cipher.decrypt(Array(encrypted[at..<at+16])) }
-            try sink?.write(contentsOf: Data(plain.prefix(count))); received += count; progress(UInt64(received))
+            let data = Data(plain.prefix(count))
+            if let resourceOffset, let sink { try ResourceFork.write(sink.fileDescriptor, offset: resourceOffset + UInt64(received), bytes: data) }
+            else { try sink?.write(contentsOf: data) }
+            received += count; progress(UInt64(received))
         }
         return UInt64(received)
     }

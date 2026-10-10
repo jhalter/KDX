@@ -16,13 +16,14 @@ struct DownloadRequest {
         b.put(dataOffset, at: 0); b.put(resourceOffset, at: 8); b[23] = options
         return b + (try path.encode())
     }
-    init(path: RemotePath, dataOffset: UInt64 = 0) { self.path = path; self.dataOffset = dataOffset }
+    init(path: RemotePath, dataOffset: UInt64 = 0, resourceOffset: UInt64 = 0) { self.path = path; self.dataOffset = dataOffset; self.resourceOffset = resourceOffset }
     init(wire b: [UInt8]) throws {
         try b.require(24)
         dataOffset = b.u64(0); resourceOffset = b.u64(8); options = b[23]
         path = try RemotePath(wire: Array(b.dropFirst(24)))
     }
-    func alignedOffset(size: UInt64) -> UInt64 { dataOffset >= size ? size : dataOffset & ~UInt64(4095) }
+    func alignedOffset(size: UInt64) -> UInt64 { Self.alignedOffset(dataOffset, size: size) }
+    static func alignedOffset(_ offset: UInt64, size: UInt64) -> UInt64 { offset >= size ? size : offset & ~UInt64(4095) }
 }
 struct DownloadInfo: Codable, Equatable {
     var dataSize: UInt64

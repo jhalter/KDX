@@ -31,6 +31,7 @@ final class PartialUpload {
             let size = prior == metadata && UInt64(attributes.st_size) <= request.dataSize ? UInt64(attributes.st_size) : 0
             let offset = size & ~UInt64(4095)
             guard ftruncate(dataFD, off_t(offset)) == 0, lseek(dataFD, off_t(offset), SEEK_SET) >= 0 else { throw POSIXError(.EIO) }
+            try ResourceFork.clear(dataFD)
             try Self.saveMetadata(metadata, directory: directory, stem: stem)
             self.parent = parent; self.directory = directory; self.stem = stem; self.name = name
             handle = FileHandle(fileDescriptor: dataFD, closeOnDealloc: true); reportedOffset = size; self.offset = offset; retainOnFailure = owner != nil

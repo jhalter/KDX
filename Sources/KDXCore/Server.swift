@@ -281,13 +281,15 @@ public struct ServerLog: Identifiable, Sendable {
         case 412:
             try requirePrivilege(10, peer: parent)
             let request = try DownloadRequest(wire: b)
-            guard request.options == 0, request.resourceOffset == 0 else { throw KDXError.remote(0x10004) }
+            guard request.options == 0 else { throw KDXError.remote(0x10004) }
             let path = request.path
             let (handle, size) = try files.openFile(path.names)
             defer { try? handle.close() }
-            let offset = request.alignedOffset(size: size)
-            guard size - offset <= UInt32.max else { throw KDXError.invalid("File is too large for a KDX transfer.") }
+            let offset = request.alignedOffset(size: size), resourceSize = try ResourceFork.size(handle.fileDescriptor)
+            let resourceOffset = DownloadRequest.alignedOffset(request.resourceOffset, size: resourceSize)
+            guard size - offset <= UInt32.max, resourceSize - resourceOffset <= UInt32.max else { throw KDXError.invalid("File is too large for a KDX transfer.") }
             var info = DownloadInfo(dataSize: size, name: path.names.last ?? "")
+            info.resourceSize = resourceSize
             var attributes = stat()
             guard fstat(handle.fileDescriptor, &attributes) == 0 else { throw POSIXError(.EIO) }
             info.created = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_birthtimespec.tv_sec) + Double(attributes.st_birthtimespec.tv_nsec)/1_000_000_000))
@@ -295,12 +297,12 @@ public struct ServerLog: Identifiable, Sendable {
             try await wire.send(type: 413, payload: info.encode(), transaction: tx, reply: true)
             try handle.seek(toOffset: offset)
             try await wire.sendFile(type: 414, length: UInt32(size-offset), source: handle, transaction: tx, reply: true)
-            try await wire.sendFile(type: 414, length: 0, source: nil)
+            try await wire.sendFile(type: 414, length: UInt32(resourceSize-resourceOffset), source: handle, resourceOffset: resourceOffset)
             record("Downloaded \(path.names.joined(separator: "/"))")
         case 415:
             try requirePrivilege(11, peer: parent)
             let request = try UploadRequest(wire: b)
-            guard request.options == 0, request.resourceSize == 0, request.dataSize <= UInt32.max else { throw KDXError.remote(0x10004) }
+            guard request.options == 0, request.resourceSize <= UInt32.max, request.dataSize <= UInt32.max else { throw KDXError.remote(0x10004) }
             // Anonymous sessions cannot resume one another's files.
             let owner = parent.account.map { $0.login + ":" + Data($0.key).base64EncodedString() }
             let upload = try PartialUpload(files: files, request: request, owner: owner)
@@ -308,7 +310,8 @@ public struct ServerLog: Identifiable, Sendable {
             let remaining = request.dataSize - upload.offset
             let length = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: remaining)
             guard length == remaining else { throw KDXError.remote(0x40074) }
-            _ = try await wire.receiveFile(type: 417, sink: nil, maximum: 0)
+            let resourceLength = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: request.resourceSize, resourceOffset: 0)
+            guard resourceLength == request.resourceSize else { throw KDXError.remote(0x40074) }
             try upload.commit()
             try await wire.send(type: 418)
             record("Uploaded \(request.strings[0])")

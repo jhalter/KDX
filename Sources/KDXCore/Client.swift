@@ -309,20 +309,25 @@ import Observation
         let wire = try await attach()
         defer { wire.close(); if activeTransfer === wire { activeTransfer = nil; transferStatus = nil } }
         transferStatus = "\(staging.offset == 0 ? "Downloading" : "Resuming") \(file.name)"; transferProgress = 0
-        let tx = try await wire.send(type: 412, payload: DownloadRequest(path: RemotePath(path), dataOffset: staging.offset).encode())
+        let tx = try await wire.send(type: 412, payload: DownloadRequest(path: RemotePath(path), dataOffset: staging.offset, resourceOffset: staging.resourceOffset).encode())
         let reply = try await wire.receive(); try checkStatus(reply)
         guard reply.type == 413, reply.transaction == tx, reply.isReply else { throw KDXError.invalid("Unexpected download reply.") }
         let info = try DownloadInfo(wire: reply.payload), size = info.dataSize
-        guard size <= UInt32.max, info.resourceSize == 0 else { throw KDXError.invalid("This transfer requires unsupported resource-fork handling or exceeds 4 GiB.") }
+        guard size <= UInt32.max, info.resourceSize <= UInt32.max else { throw KDXError.invalid("A file fork exceeds the KDX limit of 4 GiB.") }
+        let total = size + info.resourceSize
         try staging.prepare(info)
-        guard staging.offset <= size else { throw KDXError.invalid("Invalid download resume offset.") }
-        transferProgress = size == 0 ? 1 : Double(staging.offset)/Double(size)
+        guard staging.offset <= size, staging.resourceOffset <= info.resourceSize else { throw KDXError.invalid("Invalid download resume offset.") }
+        transferProgress = total == 0 ? 1 : Double(staging.offset + staging.resourceOffset)/Double(total)
         let remaining = size - staging.offset
         let count = try await wire.receiveFile(type: 414, sink: staging.handle, maximum: remaining, transaction: tx) { value in
-            if self.activeTransfer === wire { self.transferProgress = size == 0 ? 1 : Double(staging.offset+value)/Double(size) }
+            if self.activeTransfer === wire { self.transferProgress = total == 0 ? 1 : Double(staging.offset + staging.resourceOffset + value)/Double(total) }
         }
         guard count == remaining else { throw KDXError.invalid("Incomplete download. Retry the same destination to resume.") }
-        _ = try await wire.receiveFile(type: 414, sink: nil, maximum: 0)
+        let resourceRemaining = info.resourceSize - staging.resourceOffset
+        let resourceCount = try await wire.receiveFile(type: 414, sink: staging.handle, maximum: resourceRemaining, resourceOffset: staging.resourceOffset) { value in
+            if self.activeTransfer === wire { self.transferProgress = total == 0 ? 1 : Double(size + staging.resourceOffset + value)/Double(total) }
+        }
+        guard resourceCount == resourceRemaining else { throw KDXError.invalid("Incomplete resource fork. Retry the same destination to resume.") }
         guard activeTransfer === wire else { throw KDXError.disconnected }
         try staging.commit(); transferProgress = 1
     }
@@ -333,17 +338,22 @@ import Observation
         transferStatus = "Uploading \(source.lastPathComponent)"; transferProgress = 0
         let store = try SharedFiles(path: source.deletingLastPathComponent().path)
         let (handle, size) = try store.openFile([source.lastPathComponent]); defer { try? handle.close() }
-        guard size <= UInt32.max else { throw KDXError.invalid("The KDX transfer limit is 4 GiB.") }
-        let request = UploadRequest(dataSize: size, name: source.lastPathComponent, folder: RemotePath(folder))
+        let resourceSize = try ResourceFork.size(handle.fileDescriptor), total = size + resourceSize
+        guard size <= UInt32.max, resourceSize <= UInt32.max else { throw KDXError.invalid("A file fork exceeds the KDX limit of 4 GiB.") }
+        var request = UploadRequest(dataSize: size, name: source.lastPathComponent, folder: RemotePath(folder)); request.resourceSize = resourceSize
         let tx = try await wire.send(type: 415, payload: request.encode())
         let reply = try await wire.receive(); try checkStatus(reply)
         guard reply.type == 416, reply.transaction == tx, reply.isReply else { throw KDXError.invalid("Unexpected upload reply.") }
-        let offset = try UploadReply(wire: reply.payload).alignedOffset(size: size)
+        let uploadReply = try UploadReply(wire: reply.payload)
+        guard uploadReply.resourceOffset == .max || uploadReply.resourceOffset == 0 else { throw KDXError.invalid("Unexpected upload resource-fork offset.") }
+        let offset = try uploadReply.alignedOffset(size: size)
         try handle.seek(toOffset: offset)
         if offset > 0 { transferStatus = "Resuming upload of \(source.lastPathComponent)" }
-        transferProgress = size == 0 ? 1 : Double(offset)/Double(size)
-        try await wire.sendFile(type: 417, length: UInt32(size-offset), source: handle) { value in if self.activeTransfer === wire { self.transferProgress = size == 0 ? 1 : Double(offset+value)/Double(size) } }
-        try await wire.sendFile(type: 417, length: 0, source: nil)
+        transferProgress = total == 0 ? 1 : Double(offset)/Double(total)
+        try await wire.sendFile(type: 417, length: UInt32(size-offset), source: handle) { value in if self.activeTransfer === wire { self.transferProgress = total == 0 ? 1 : Double(offset+value)/Double(total) } }
+        try await wire.sendFile(type: 417, length: UInt32(resourceSize), source: handle, resourceOffset: 0) { value in
+            if self.activeTransfer === wire { self.transferProgress = total == 0 ? 1 : Double(size+value)/Double(total) }
+        }
         let complete = try await wire.receive(); try checkStatus(complete)
         guard complete.type == 418 else { throw KDXError.invalid("Upload was not acknowledged.") }
         guard activeTransfer === wire else { throw KDXError.disconnected }
