@@ -32,6 +32,9 @@ final class TrackerTests: XCTestCase {
         let server = try XCTUnwrap(TrackerServer.decodeList(servers).first)
         XCTAssertEqual(server.name, "Mac"); XCTAssertEqual(server.description, "Test")
         XCTAssertEqual(server.host, "192.0.2.7"); XCTAssertEqual(server.port, 10700)
+        XCTAssertTrue(server.isTracker)
+        var ordinary = servers; ordinary[19] = 0
+        XCTAssertFalse(try TrackerServer.decodeList(ordinary)[0].isTracker)
         XCTAssertEqual(Array(server.header.prefix(8)), bytes("01 02 03 04 05 06 07 08"))
         var two = servers; two[3] = 2; two += servers.dropFirst(4)
         XCTAssertEqual(try TrackerServer.decodeList(two).map(\.host), ["192.0.2.7", "192.0.2.7"])

@@ -10,6 +10,7 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
     public var downloadLimit: UInt32 = 0
     var settingsBlob: [UInt8]?
     public var port: UInt16 = 10700
+    public var tracker = TrackerAdvertisementSettings()
     public var allowGuests = true
     public var accounts: [ServerAccount] = []
     public var accountClasses: [AccountClass] = AccountClass.defaults
@@ -17,7 +18,7 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
     public var sharedFolder = ""
     public var newsFile = ""
     public init() {}
-    private enum CodingKeys: String, CodingKey { case name, description, greeting, greetingEnabled, downloadLimit, settingsBlob, port, allowGuests, accounts, accountClasses, chats, sharedFolder, newsFile }
+    private enum CodingKeys: String, CodingKey { case name, description, greeting, greetingEnabled, downloadLimit, settingsBlob, port, tracker, allowGuests, accounts, accountClasses, chats, sharedFolder, newsFile }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name); description = try c.decode(String.self, forKey: .description)
@@ -25,6 +26,7 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
         greetingEnabled = try c.decodeIfPresent(Bool.self, forKey: .greetingEnabled) ?? false
         downloadLimit = try c.decodeIfPresent(UInt32.self, forKey: .downloadLimit) ?? 0
         settingsBlob = try c.decodeIfPresent([UInt8].self, forKey: .settingsBlob)
+        tracker = try c.decodeIfPresent(TrackerAdvertisementSettings.self, forKey: .tracker) ?? TrackerAdvertisementSettings()
         port = try c.decode(UInt16.self, forKey: .port); allowGuests = try c.decode(Bool.self, forKey: .allowGuests)
         accounts = try c.decode([ServerAccount].self, forKey: .accounts)
         accountClasses = try c.decodeIfPresent([AccountClass].self, forKey: .accountClasses) ?? AccountClass.defaults
@@ -46,6 +48,10 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
     }
     public static func load(from url: URL) throws -> Self { try JSONDecoder().decode(Self.self, from: Data(contentsOf: url)) }
     func validate() throws {
+        try tracker.validate()
+        if tracker.enabled {
+            _ = try TrackerAdvertisement(name: name, description: description, port: tracker.advertisedPort == 0 ? max(port, 1) : tracker.advertisedPort, userCount: 0, groups: tracker.groups).encode()
+        }
         _ = try remoteSettings().encode()
         _ = try shortText(name); _ = try shortText(description)
         guard !name.isEmpty, Set(accounts.map(\.login)).count == accounts.count else { throw KDXError.invalid("Server name is required and account logins must be unique.") }
@@ -76,6 +82,9 @@ public struct ServerLog: Identifiable, Sendable {
     public private(set) var users: [KDXUser] = []
     public private(set) var log: [ServerLog] = []
     public private(set) var lastError: String?
+    public private(set) var trackerStatus = "Advertising disabled"
+    public private(set) var lastTrackerAdvertisement: Date?
+    private let trackerAdvertiser = TrackerAdvertiser()
     private var listener: NWListener?
     private var startWaiter: CheckedContinuation<Void, Error>?
     private var peers: [UUID: Peer] = [:]
@@ -131,6 +140,7 @@ public struct ServerLog: Identifiable, Sendable {
                         self.port = listener.port?.rawValue; self.isRunning = true
                         self.appendHistory(kind: 190)
                         self.record("Listening on port \(self.port ?? 0)")
+                        self.startTrackerAdvertising()
                         self.startWaiter?.resume(); self.startWaiter = nil
                     case .failed(let error):
                         self.lastError = error.localizedDescription; self.startWaiter?.resume(throwing: error); self.startWaiter = nil; self.stop()
@@ -150,10 +160,24 @@ public struct ServerLog: Identifiable, Sendable {
         }
     }
     public func stop() {
+        trackerAdvertiser.stop(); trackerStatus = "Advertising stopped"; lastTrackerAdvertisement = nil
         startWaiter?.resume(throwing: KDXError.disconnected); startWaiter = nil
         let old = listener; listener = nil; old?.cancel()
         for peer in peers.values { peer.wire.close() }; peers.removeAll()
         users = []; chatTopics = [:]; privateChats = [:]; nextInvitation = 1; newsLoaded = false; port = nil; isRunning = false; record("Server stopped")
+    }
+    private func startTrackerAdvertising() {
+        trackerStatus = configuration.tracker.enabled ? "Sending advertisement…" : "Advertising disabled"
+        lastTrackerAdvertisement = nil
+        trackerAdvertiser.start(settings: configuration.tracker, snapshot: { [weak self] in
+            guard let self, self.isRunning, let port = self.port else { throw KDXError.disconnected }
+            return TrackerAdvertisement(name: self.configuration.name, description: self.configuration.description,
+                                        port: self.configuration.tracker.advertisedPort == 0 ? port : self.configuration.tracker.advertisedPort,
+                                        userCount: UInt16(clamping: self.users.count), groups: self.configuration.tracker.groups)
+        }, report: { [weak self] status, sent in
+            self?.trackerStatus = status
+            if let sent { self?.lastTrackerAdvertisement = sent }
+        })
     }
     public func disconnectUser(_ id: UInt32) { peers.values.first { $0.user?.id == id }?.wire.close() }
     private func record(_ text: String) { log.append(ServerLog(text: text)); if log.count > 500 { log.removeFirst() } }

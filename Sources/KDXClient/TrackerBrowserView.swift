@@ -47,7 +47,7 @@ struct TrackerBrowserView: View {
                     TextField("Search servers", text: $search).textFieldStyle(.roundedBorder)
                     List(visibleServers, selection: $selectedServer) { server in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(server.name.isEmpty ? "Unnamed server" : server.name).font(.headline)
+                            Label(server.name.isEmpty ? "Unnamed entry" : server.name, systemImage: server.isTracker ? "network" : "server.rack").font(.headline)
                             if !server.description.isEmpty { Text(server.description).font(.callout).foregroundStyle(.secondary) }
                             if let host = server.host, let port = server.port {
                                 Text("\(host):\(String(port))").font(.caption).foregroundStyle(.secondary)
@@ -68,8 +68,11 @@ struct TrackerBrowserView: View {
                 }
                 Spacer()
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Use Server") {
-                    if let server = chosen, let host = server.host, let port = server.port, port > 0 { choose(host, port); dismiss() }
+                Button(chosen?.isTracker == true ? "Use Tracker Address" : "Use Server") {
+                    if let server = chosen, let address = server.host, let number = server.port, number > 0 {
+                        if server.isTracker { host = address; port = String(number); reset() }
+                        else { choose(address, number); dismiss() }
+                    }
                 }.buttonStyle(.borderedProminent).disabled(chosen?.host == nil || chosen?.port == nil || chosen?.port == 0 || lookup != nil)
             }
         }.padding(24).frame(width: 780, height: 560)

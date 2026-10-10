@@ -29,6 +29,10 @@ struct ServerView: View {
                 Text("connected users").foregroundStyle(.secondary)
                 if server.isRunning { Button("Stop Server", systemImage: "stop.fill") { server.stop() }.buttonStyle(.bordered) }
                 else { Button(starting ? "Starting…" : "Start Server", systemImage: "play.fill", action: start).buttonStyle(.borderedProminent).disabled(!tableReady || starting) }
+                if configuration.tracker.enabled && server.isRunning {
+                    Text(server.trackerStatus).font(.caption).foregroundStyle(.secondary)
+                    if let sent = server.lastTrackerAdvertisement { Text(sent, style: .time).font(.caption) }
+                }
                 Spacer()
                 Label(tableReady ? "Challenge table ready" : "Challenge table required", systemImage: "key").font(.caption)
                 if tableDownload != nil {
@@ -60,6 +64,16 @@ struct ServerView: View {
                             }
                         }
                         Text("Guests may download. Signed-in accounts may upload. Existing files are never overwritten.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Section("Tracker") {
+                        Toggle("Advertise this server", isOn: $configuration.tracker.enabled)
+                        if configuration.tracker.enabled {
+                            TextField("Tracker address", text: $configuration.tracker.host)
+                            TextField("Tracker UDP port", value: $configuration.tracker.port, format: .number.grouping(.never))
+                            TextField("Advertised TCP port (0 = listening port)", value: $configuration.tracker.advertisedPort, format: .number.grouping(.never))
+                            TextField("Groups (one per line, up to six)", text: Binding(get: { configuration.tracker.groups.joined(separator: "\n") }, set: { configuration.tracker.groups = $0.components(separatedBy: "\n") }), axis: .vertical).lineLimit(2...6)
+                            Text("Publishes the server name, description, address, and user count every five minutes while running. The tracker chooses which groups accept the listing. Stopping advertisements lets the listing expire; removal is not immediate.").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     Section("Accounts") {
                         ForEach(configuration.accounts) { account in

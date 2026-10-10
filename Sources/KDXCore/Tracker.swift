@@ -35,6 +35,7 @@ public struct TrackerServer: Identifiable, Equatable, Sendable {
     public let description: String
     public let host: String?
     public let port: UInt16?
+    public var isTracker: Bool { header.u16(14) & 1 != 0 }
     // Retain unknown fields without assigning unverified meanings to them.
     let header: [UInt8]
     let address: [UInt8]
