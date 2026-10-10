@@ -20,6 +20,7 @@ struct ClientView: View {
     @State private var password = ""
     @State private var draft = ""
     @State private var error: String?
+    @State private var inspectingFile: FileInspection?
     @State private var importing = false
     @State private var tableReady = false
     @State private var section = "Chat"
@@ -126,6 +127,7 @@ struct ClientView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
         }
+        .sheet(item: $inspectingFile) { FileInformationView(client: client, path: $0.path) }
         .sheet(isPresented: $composingBroadcast) { BroadcastComposer(client: client) }
         .sheet(isPresented: $viewingBroadcasts) { BroadcastHistory(client: client) }
         .sheet(item: $disconnectingUser) { DisconnectUserView(client: client, user: $0) }
@@ -214,6 +216,7 @@ struct ClientView: View {
                 Text("/" + client.filePath.joined(separator: "/")).font(.headline)
                 Spacer()
                 Button("Refresh", systemImage: "arrow.clockwise") { perform { try await client.listFiles(path: client.filePath) } }
+                Button("Folder Info", systemImage: "info.circle") { inspectingFile = FileInspection(path: client.filePath) }
                 Button("Upload…", systemImage: "square.and.arrow.up") { chooseUpload() }.disabled(client.transferStatus != nil)
             }.padding()
             Divider()
@@ -223,6 +226,7 @@ struct ClientView: View {
                     Text(file.name)
                     Spacer()
                     if !file.isDirectory { Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: file.size), countStyle: .file)).foregroundStyle(.secondary) }
+                    Button("Info", systemImage: "info.circle") { inspectingFile = FileInspection(path: client.filePath + [file.name]) }.labelStyle(.iconOnly)
                     Button(file.isDirectory ? "Open" : "Download…") {
                         if file.isDirectory { perform { try await client.listFiles(path: client.filePath + [file.name]) } }
                         else { chooseDownload(file) }

@@ -40,3 +40,7 @@ Port 37484 creates the private room and sends invitations; 37478 receives them.
 They also capture broadcast delivery and a self-disconnection with its notice.
 Both use the public lab password. Reproduce each with scripts/extract-capture.py,
 the source pcapng, its client port, and the matching fixture output prefix.
+
+probe-54328.*.bin comes from the same reference commit and MIT license, with
+public lab password 'lab-only-pw!1'. It covers folder info and file lists.
+List re-encoding normalizes uninitialized padding, matching the Rust test.

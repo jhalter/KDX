@@ -278,6 +278,10 @@ public struct ServerLog: Identifiable, Sendable {
         case 400:
             let files = try SharedFiles(path: configuration.sharedFolder).list(RemotePath(wire: b).names)
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files), transaction: tx, reply: true)
+        case 409:
+            try requirePrivilege(20, peer: peers[id])
+            let files = try SharedFiles(path: configuration.sharedFolder)
+            try await wire.send(type: 410, payload: files.information(RemotePath(wire: b).names).encode(), transaction: tx, reply: true)
         case 200...220:
             try await handleChat(message, id: id, wire: wire)
         case 300:
@@ -306,6 +310,7 @@ public struct ServerLog: Identifiable, Sendable {
             guard size - offset <= UInt32.max, resourceSize - resourceOffset <= UInt32.max else { throw KDXError.invalid("File is too large for a KDX transfer.") }
             var info = DownloadInfo(dataSize: size, name: path.names.last ?? "")
             info.resourceSize = resourceSize
+            info.strings[1] = FileKind.from(name: info.strings[0], isDirectory: false)
             var attributes = stat()
             guard fstat(handle.fileDescriptor, &attributes) == 0 else { throw POSIXError(.EIO) }
             info.created = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_birthtimespec.tv_sec) + Double(attributes.st_birthtimespec.tv_nsec)/1_000_000_000))

@@ -7,13 +7,16 @@ public struct RemoteFile: Identifiable, Sendable {
     public var size: UInt64
     public var isDirectory: Bool
     public var modified: Date
+    public var created: Date? = nil
+    public var kind: String = ""
+    var header: [UInt8]? = nil
     static func decodeList(_ b: [UInt8]) throws -> [RemoteFile] {
         if b.isEmpty { return [] }; try b.require(4)
         guard b.u32(0) <= UInt32(b.count / 56) else { throw KDXError.invalid("Invalid file list count.") }
         var at = 4, files = [RemoteFile]()
         for _ in 0..<b.u32(0) {
             try b.require(at+56); let n = Int(b[at+53]), k = Int(b[at+54]); try b.require(at+56+n+k)
-            files.append(RemoteFile(name: b.text(at+56..<at+56+n), size: b.u64(at), isDirectory: b.u32(at+32) & 2 != 0, modified: KDXTime.decode(b.u64(at+16))))
+            files.append(RemoteFile(name: b.text(at+56..<at+56+n), size: b.u64(at), isDirectory: b.u32(at+32) & 2 != 0, modified: KDXTime.decode(b.u64(at+16)), created: b.u64(at+8) == 0 ? nil : KDXTime.decode(b.u64(at+8)), kind: b.text(at+56+n..<at+56+n+k), header: Array(b[at..<at+56])))
             at += min((56+n+k+3) & ~3, b.count-at)
         }
         return files
@@ -22,12 +25,16 @@ public struct RemoteFile: Identifiable, Sendable {
         if files.isEmpty { return [] }
         var out = UInt32(files.count).beBytes
         for file in files {
-            let name = try shortText(file.name)
-            var b = [UInt8](repeating: 0, count: 56)
-            b.put(file.size, at: 0); b.put(KDXTime.encode(file.modified), at: 16)
-            b.put(UInt32(file.isDirectory ? 0x01000002 : 1), at: 32)
-            b.put(UInt16(file.isDirectory ? 0xffff : 0), at: 46); b[52] = 4; b[53] = UInt8(name.count)
-            out += b + name; out.pad(4)
+            let name = try shortText(file.name), kind = try shortText(file.kind)
+            var b = file.header ?? [UInt8](repeating: 0, count: 56)
+            guard b.count == 56 else { throw KDXError.invalid("Invalid file-list header.") }
+            b.put(file.size, at: 0); b.put(file.created.map(KDXTime.encode) ?? 0, at: 8); b.put(KDXTime.encode(file.modified), at: 16)
+            if file.header == nil {
+                b.put(UInt32(file.isDirectory ? 0x01000002 : 1), at: 32)
+                b.put(UInt16(file.isDirectory ? 0xffff : 0), at: 46)
+            }
+            b[53] = UInt8(name.count); b[54] = UInt8(kind.count)
+            out += b + name + kind; out.pad(4)
         }
         guard out.count <= 0x100000 else { throw KDXError.invalid("Directory listing exceeds the KDX protocol limit.") }
         return out
@@ -97,10 +104,30 @@ final class SharedFiles {
             guard fstatat(fd, name, &attributes, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
             let kind = attributes.st_mode & S_IFMT
             guard kind == S_IFDIR || kind == S_IFREG else { continue }
-            result.append(RemoteFile(name: name, size: UInt64(max(0, attributes.st_size)), isDirectory: kind == S_IFDIR, modified: Date(timeIntervalSince1970: Double(attributes.st_mtimespec.tv_sec))))
+            result.append(RemoteFile(name: name, size: UInt64(max(0, attributes.st_size)), isDirectory: kind == S_IFDIR, modified: Self.date(attributes.st_mtimespec), created: Self.date(attributes.st_birthtimespec), kind: kind == S_IFDIR ? "" : FileKind.from(name: name, isDirectory: false)))
             guard result.count <= 10000 else { throw KDXError.invalid("Directory has too many entries.") }
         }
         return result.sorted { if $0.isDirectory != $1.isDirectory { return $0.isDirectory }; return $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+    private static func date(_ value: timespec) -> Date {
+        Date(timeIntervalSince1970: Double(value.tv_sec) + Double(value.tv_nsec)/1_000_000_000)
+    }
+    func information(_ names: [String]) throws -> RemoteFileInformation {
+        let fd: Int32
+        if let name = names.last {
+            try RemotePath.validateName(name)
+            let parent = try directory(Array(names.dropLast())); defer { Darwin.close(parent) }
+            fd = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        } else { fd = dup(root) }
+        guard fd >= 0 else { throw KDXError.remote(0x10014) }
+        defer { Darwin.close(fd) }
+        var attributes = stat()
+        guard fstat(fd, &attributes) == 0, [S_IFDIR,S_IFREG].contains(attributes.st_mode & S_IFMT) else { throw KDXError.remote(0x10014) }
+        let isDirectory = attributes.st_mode & S_IFMT == S_IFDIR, name = names.last ?? "Shared Files"
+        var info = RemoteFileInformation(name: name, kind: FileKind.from(name: name, isDirectory: isDirectory), size: UInt64(max(0, attributes.st_size)),
+                                         created: Self.date(attributes.st_birthtimespec), modified: Self.date(attributes.st_mtimespec))
+        info.header.put(UInt32(isDirectory ? 2 : 1), at: 40)
+        return info
     }
     func openFile(_ names: [String]) throws -> (FileHandle, UInt64) {
         guard let name = names.last else { throw KDXError.remote(0x1000a) }; try RemotePath.validateName(name)

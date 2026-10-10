@@ -27,7 +27,7 @@ public struct AccountPrivileges: Codable, Equatable, Sendable {
         var result = Self(); for bit in bits { result.set(bit, true) }; return result
     }
     public static let editable: [(bit: Int, name: String)] = [
-        (0, "Administrator override"), (10, "Download files"), (11, "Upload files"),
+        (0, "Administrator override"), (10, "Download files"), (11, "Upload files"), (20, "View file attributes"),
         (30, "Join chats"), (31, "Send chat"), (32, "Send private messages"), (35, "Set chat topics"),
         (33, "Send broadcasts"), (34, "Create private chats"), (37, "Manage chats"), (40, "View user information"), (41, "Disconnect users"), (42, "Cannot be disconnected remotely"),
         (50, "View accounts"), (51, "Create accounts"), (52, "Modify accounts"),
@@ -48,8 +48,8 @@ public struct AccountClass: Identifiable, Codable, Equatable, Sendable {
         self.id = id; self.name = name; self.privileges = privileges
     }
     public static let defaults: [AccountClass] = [
-        AccountClass(id: 0, name: "Administrator", privileges: .enabled([0,10,11,30,31,32,33,34,35,37,40,41,50,51,52,53,60,61,70,71,72,73,74])),
-        AccountClass(id: 1, name: "Member", privileges: .enabled([10,11,30,31,32,34,35,40,53,60,70,71,74])),
+        AccountClass(id: 0, name: "Administrator", privileges: .enabled([0,10,11,20,30,31,32,33,34,35,37,40,41,50,51,52,53,60,61,70,71,72,73,74])),
+        AccountClass(id: 1, name: "Member", privileges: .enabled([10,11,20,30,31,32,34,35,40,53,60,70,71,74])),
         AccountClass(id: 2, name: "Guest", privileges: .enabled([10,30,31,32,60,70]))
     ]
     func encode(info: Bool, padded: Bool = true) throws -> [UInt8] {

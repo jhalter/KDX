@@ -379,6 +379,11 @@ import Observation
         if let error = operation.error { throw error }
     }
     func setTransferFactory(_ factory: @escaping () throws -> WireConnection) { transferFactory = factory }
+    public func fileInformation(path: [String]) async throws -> RemoteFileInformation {
+        let response = try await request(type: 409, payload: RemotePath(path).encode())
+        guard response.type == 410 else { throw KDXError.invalid("Unexpected file-information reply.") }
+        return try RemoteFileInformation.decode(response.payload)
+    }
     public func listFiles(path: [String] = []) async throws {
         let response = try await request(type: 400, payload: RemotePath(path).encode())
         let entries = try RemoteFile.decodeList(response.payload)
