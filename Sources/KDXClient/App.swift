@@ -29,6 +29,9 @@ struct ClientView: View {
     @State private var posting = false
     @State private var changingPassword = false
     @State private var recipient: UInt32?
+    @State private var editingChat: ChatRecord?
+    @State private var deletingChat: ChatRoom?
+    @State private var editingTopic = false
     var body: some View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 16) {
@@ -42,12 +45,20 @@ struct ClientView: View {
                         Text("Chat").tag("Chat"); Text("Files").tag("Files"); Text("News").tag("News"); Text("Accounts").tag("Accounts")
                     }.pickerStyle(.segmented)
                     Divider()
-                    Text("CHAT ROOMS").font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text("CHAT ROOMS").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Create Room", systemImage: "plus") { editingChat = ChatRecord(name: "") }.labelStyle(.iconOnly)
+                    }
                     ForEach(client.rooms) { room in
-                        Button { perform { try await client.join(room: room.id, key: room.key) } } label: {
+                        Button { section = "Chat"; perform { try await client.join(room: room.id, key: room.key) } } label: {
                             HStack { Image(systemName: "number"); Text(room.name); Spacer(); Text("\(room.memberCount)").foregroundStyle(.secondary) }
                         }.buttonStyle(.plain).padding(8)
                             .background(client.joinedRoom == room.id ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                            .contextMenu {
+                                Button("Edit Room…") { perform { editingChat = try await client.chatRecord(id: room.id) } }
+                                if room.id != 1 { Button("Delete Room…", role: .destructive) { deletingChat = room } }
+                            }
                     }
                     Spacer()
                     Button("Change Password…", systemImage: "key") { changingPassword = true }
@@ -80,6 +91,12 @@ struct ClientView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
         }
+        .sheet(item: $editingChat) { ChatEditorView(client: client, room: $0) }
+        .sheet(isPresented: $editingTopic) { ChatTopicEditor(client: client, topic: client.chatTopics[client.joinedRoom ?? 0]?.text ?? "") }
+        .confirmationDialog("Delete Chat Room", isPresented: Binding(get: { deletingChat != nil }, set: { if !$0 { deletingChat = nil } }), titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { if let room = deletingChat { perform { try await client.deleteChat(id: room.id) } }; deletingChat = nil }
+            Button("Cancel", role: .cancel) { deletingChat = nil }
+        } message: { Text("Delete “\(deletingChat?.name ?? "")”? Everyone in this room will leave it.") }
         .sheet(isPresented: $changingPassword) { ChangePasswordView(client: client) { password = $0 } }
         .onChange(of: client.sessionLogin) { _, value in if client.isConnected { login = value } }
         .task { tableReady = (try? KDXStorage.loadTable()) != nil }
@@ -176,8 +193,15 @@ struct ClientView: View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 HStack {
-                    Label(client.rooms.first { $0.id == client.joinedRoom }?.name ?? "Chat", systemImage: "number").font(.title2.bold())
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(client.rooms.first { $0.id == client.joinedRoom }?.name ?? client.chatWindow?.name ?? "Choose a room", systemImage: "number").font(.title2.bold())
+                        if let topic = client.chatTopics[client.joinedRoom ?? 0], !topic.text.isEmpty { Text(topic.text).font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
+                    }
                     Spacer()
+                    Menu("Room", systemImage: "ellipsis.circle") {
+                        Button("Set Topic…") { editingTopic = true }.disabled(client.joinedRoom == nil)
+                        Button("Leave Room") { perform { try await client.leaveRoom() } }.disabled(client.joinedRoom == nil)
+                    }
                     Button("Refresh", systemImage: "arrow.clockwise") { perform { try await client.refreshRooms() } }.labelStyle(.iconOnly)
                 }.padding()
                 Divider()
@@ -207,7 +231,7 @@ struct ClientView: View {
                     }
                     HStack {
                         TextField(recipient == nil ? "Message the room" : "Private message", text: $draft).textFieldStyle(.roundedBorder).onSubmit(send)
-                        Button("Send", systemImage: "paperplane.fill", action: send).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Send", systemImage: "paperplane.fill", action: send).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (recipient == nil && client.joinedRoom == nil))
                     }
                 }.padding()
             }
@@ -215,7 +239,10 @@ struct ClientView: View {
             VStack(alignment: .leading) {
                 Text("ONLINE · \(client.users.count)").font(.caption.bold()).foregroundStyle(.secondary).padding([.horizontal,.top])
                 List(client.users) { user in
-                    HStack { Image(systemName: user.isAdmin ? "person.badge.key.fill" : "person.fill"); Text(user.nickname); Spacer() }
+                    HStack {
+                        Image(systemName: user.isAdmin ? "person.badge.key.fill" : "person.fill"); Text(user.nickname); Spacer()
+                        if client.chatWindow?.members.contains(user.id) == true { Image(systemName: "bubble.left.fill").font(.caption).foregroundStyle(.secondary).help("In this room") }
+                    }
                         .contextMenu { if user.id != client.serverInfo?.userID { Button("Private Message") { recipient = user.id } } }
                 }.listStyle(.sidebar)
             }.frame(width: 190)

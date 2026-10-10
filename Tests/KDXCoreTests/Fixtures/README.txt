@@ -10,3 +10,7 @@ reference commit and license. They independently cover account creation,
 redacted account info, rename, password change, deletion, class info/list,
 and account lists. The 58336 session uses the public lab password
 'rs-test-pw'; the other added fixtures use 'lab-only-pw!1'.
+
+probe-35844.*.bin uses the same reference commit, license, and public lab
+password. It independently captures chat join, chat text, topic changes,
+and chat info. probe-50770 also includes the reference room list.

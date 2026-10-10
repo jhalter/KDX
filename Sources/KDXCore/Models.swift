@@ -60,16 +60,29 @@ public struct ChatLine: Identifiable, Sendable {
     public var text: String
     public var isPrivate: Bool = false
 }
-public struct ChatRoom: Identifiable, Sendable {
+public struct ChatRoom: Identifiable, Equatable, Sendable {
     public var id: UInt32, key: UInt32
     public var name: String, description: String
     public var memberCount: Int
+    public var flags: UInt16 = 0
+    static func encodeList(_ rooms: [ChatRoom]) throws -> [UInt8] {
+        var out = UInt32(rooms.count).beBytes
+        for room in rooms {
+            let name = try shortText(room.name), description = try shortText(room.description)
+            guard (0...Int(UInt16.max)).contains(room.memberCount) else { throw KDXError.invalid("Invalid room member count.") }
+            var entry = [UInt8](repeating: 0, count: 20)
+            entry.put(room.id, at: 0); entry.put(room.key, at: 4); entry.put(room.flags, at: 14); entry.put(UInt16(room.memberCount), at: 16)
+            entry[18] = UInt8(name.count); entry[19] = UInt8(description.count)
+            out += entry + name + description; out.pad(4)
+        }
+        return out
+    }
     static func list(_ b: [UInt8]) throws -> [ChatRoom] {
         try b.require(4); var at = 4, result = [ChatRoom]()
         guard b.u32(0) <= UInt32(b.count / 20) else { throw KDXError.invalid("Invalid chat count.") }
         for _ in 0..<b.u32(0) {
             try b.require(at+20); let n = Int(b[at+18]), d = Int(b[at+19]); try b.require(at+20+n+d)
-            result.append(ChatRoom(id: b.u32(at), key: b.u32(at+4), name: b.text(at+20..<at+20+n), description: b.text(at+20+n..<at+20+n+d), memberCount: Int(b.u16(at+16))))
+            result.append(ChatRoom(id: b.u32(at), key: b.u32(at+4), name: b.text(at+20..<at+20+n), description: b.text(at+20+n..<at+20+n+d), memberCount: Int(b.u16(at+16)), flags: b.u16(at+14)))
             at += min((20+n+d+3) & ~3, b.count-at)
         }
         return result
