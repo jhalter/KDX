@@ -13,5 +13,10 @@ public enum KDXStorage {
         defer { if scoped { file.stopAccessingSecurityScopedResource() } }
         try ChallengeTable(file: file).save(to: tableURL())
     }
+    public static func downloadTable() async throws {
+        let table = try await ChallengeTable.download()
+        try Task.checkCancellation()
+        try table.save(to: tableURL())
+    }
     public static func configurationURL() throws -> URL { try directory().appendingPathComponent("server.json") }
 }

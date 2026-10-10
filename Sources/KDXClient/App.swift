@@ -37,7 +37,9 @@ struct ClientView: View {
     @State private var viewingGreeting = false
     @State private var inspectingFile: FileInspection?
     @State private var importing = false
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tableReady = false
+    @State private var tableDownload: Task<Void, Never>?
     @State private var section = "Chat"
     @State private var newsGroup: UInt32 = 1
     @State private var editingNewsGroup: NewsGroupInfo?
@@ -149,8 +151,15 @@ struct ClientView: View {
                     Spacer()
                     Label(tableReady ? "Challenge table ready" : "Import a KDX challenge table", systemImage: tableReady ? "checkmark.seal" : "key")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Import KDX Binary or Table…") { importing = true }
-                    Text("Select an uncompressed original KDX program, or a challenge-table.bin exported by the reference client.").font(.caption).foregroundStyle(.secondary)
+                    if tableDownload != nil {
+                        HStack { ProgressView().controlSize(.small); Text("Downloading…") }
+                        Button("Cancel Download") { tableDownload?.cancel() }
+                    } else if !tableReady {
+                        Button("Download Challenge Table", systemImage: "arrow.down.circle", action: downloadTable)
+                        Text("Downloads an original KDX archive from the Internet Archive.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button("Import Challenge Table…") { importing = true }.disabled(tableDownload != nil)
+                    Text("Select an original KDX program, its ZIP archive, or a challenge-table.bin exported by the reference client.").font(.caption).foregroundStyle(.secondary)
                 }
             }.padding().frame(maxWidth: .infinity, alignment: .leading)
             }.navigationSplitViewColumnWidth(min: 260, ideal: 290)
@@ -159,6 +168,10 @@ struct ClientView: View {
             else {
                 ContentUnavailableView("Connect to your community", systemImage: "bubble.left.and.bubble.right", description: Text("Join a KDX server to chat and exchange private messages."))
             }
+        }
+        .onDisappear { tableDownload?.cancel() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { tableReady = (try? KDXStorage.loadTable()) != nil }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
@@ -389,4 +402,14 @@ struct ClientView: View {
     private func perform(_ action: @escaping @MainActor () async throws -> Void) {
         Task { do { try await action() } catch { self.error = error.localizedDescription } }
     }
+    private func downloadTable() {
+        guard tableDownload == nil else { return }
+        tableDownload = Task {
+            do { try await KDXStorage.downloadTable(); tableReady = true }
+            catch is CancellationError { }
+            catch { if !Task.isCancelled { self.error = error.localizedDescription } }
+            tableDownload = nil
+        }
+    }
+
 }

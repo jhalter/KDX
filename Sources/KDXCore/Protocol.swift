@@ -18,16 +18,45 @@ public struct AccountKey: Sendable {
 
 public struct ChallengeTable: Sendable {
     let bytes: [UInt8]
-    public init(file: URL) throws { try self.init(data: Data(contentsOf: file)) }
-    public init(data: Data) throws {
-        let marker = Data("This program including the following story".utf8)
-        let start = data.count == 1739 ? data.startIndex : data.range(of: marker)?.lowerBound
-        guard let start, data.count - start >= 1739 else { throw KDXError.invalid("No KDX challenge table found. Import an uncompressed KDX program or a saved table.") }
-        let table = Data(data[start..<start+1739])
-        guard SHA256.hash(data: table).map({ String(format: "%02x", $0) }).joined() == "4fca7636e77e85fdde95862a6be66e12e5e031ad61add65c5e975d3daff4b9e7" else {
-            throw KDXError.invalid("The KDX challenge table checksum does not match.")
+    public init(file: URL) throws {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var data = Data()
+        while let chunk = try handle.read(upToCount: min(65536, TableArchive.fileLimit+1-data.count)), !chunk.isEmpty {
+            data.append(chunk)
+            guard data.count <= TableArchive.fileLimit else { throw KDXError.invalid("Import files must be 32 MiB or smaller.") }
         }
-        bytes = Array(table)
+        try self.init(data: data)
+    }
+    public init(data: Data) throws {
+        guard data.count <= TableArchive.fileLimit else { throw KDXError.invalid("Import files must be 32 MiB or smaller.") }
+        if data.starts(with: [0x50,0x4b,0x03,0x04]) {
+            let archive = try TableArchive(data: data)
+            for entry in archive.entries {
+                if let file = try archive.contents(of: entry), let table = Self.verifiedBytes(in: file) { bytes = table; return }
+            }
+            throw KDXError.invalid("No verified KDX challenge table found in this ZIP. Choose an original KDX program archive.")
+        }
+        guard let table = Self.verifiedBytes(in: data) else {
+            throw KDXError.invalid("No verified KDX challenge table found. Import an original KDX program, its ZIP archive, or a saved table.")
+        }
+        bytes = table
+    }
+    private static func verifiedBytes(in data: Data) -> [UInt8]? {
+        let expected = "4fca7636e77e85fdde95862a6be66e12e5e031ad61add65c5e975d3daff4b9e7"
+        func valid(_ table: Data) -> Bool { SHA256.hash(data: table).map { String(format: "%02x", $0) }.joined() == expected }
+        if data.count == 1739, valid(data) { return Array(data) }
+        let marker = Data("This program including the following story".utf8)
+        var searchStart = data.startIndex
+        while searchStart < data.endIndex, let range = data.range(of: marker, in: searchStart..<data.endIndex) {
+            let start = range.lowerBound
+            if data.endIndex-start >= 1739 {
+                let table = Data(data[start..<start+1739])
+                if valid(table) { return Array(table) }
+            }
+            searchStart = range.upperBound
+        }
+        return nil
     }
     // Internal initializer only for independent, synthetic transport tests.
     init(testBytes: [UInt8]) { precondition(testBytes.count == 1739); bytes = testBytes }

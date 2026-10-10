@@ -15,7 +15,9 @@ struct ServerView: View {
     @State private var accountAdmin = false
     @State private var error: String?
     @State private var importing = false
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tableReady = false
+    @State private var tableDownload: Task<Void, Never>?
     @State private var starting = false
     var body: some View {
         NavigationSplitView {
@@ -29,8 +31,15 @@ struct ServerView: View {
                 else { Button(starting ? "Starting…" : "Start Server", systemImage: "play.fill", action: start).buttonStyle(.borderedProminent).disabled(!tableReady || starting) }
                 Spacer()
                 Label(tableReady ? "Challenge table ready" : "Challenge table required", systemImage: "key").font(.caption)
-                Button("Import KDX Binary or Table…") { importing = true }.disabled(server.isRunning)
-                Text("Use an uncompressed original KDX binary or an exported challenge-table.bin.").font(.caption).foregroundStyle(.secondary)
+                if tableDownload != nil {
+                    HStack { ProgressView().controlSize(.small); Text("Downloading…") }
+                    Button("Cancel Download") { tableDownload?.cancel() }
+                } else if !tableReady {
+                    Button("Download Challenge Table", systemImage: "arrow.down.circle", action: downloadTable)
+                    Text("Downloads an original KDX archive from the Internet Archive.").font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Import Challenge Table…") { importing = true }.disabled(server.isRunning || starting || tableDownload != nil)
+                Text("Use an original KDX program, its ZIP archive, or an exported challenge-table.bin.").font(.caption).foregroundStyle(.secondary)
             }.padding().navigationSplitViewColumnWidth(min: 235, ideal: 260)
         } detail: {
             TabView {
@@ -83,6 +92,10 @@ struct ServerView: View {
                 }.tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
             }.padding()
         }
+        .onDisappear { tableDownload?.cancel() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { tableReady = (try? KDXStorage.loadTable()) != nil }
+        }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
         }
@@ -127,4 +140,14 @@ struct ServerView: View {
             } catch { self.error = error.localizedDescription }
         }
     }
+    private func downloadTable() {
+        guard tableDownload == nil else { return }
+        tableDownload = Task {
+            do { try await KDXStorage.downloadTable(); tableReady = true }
+            catch is CancellationError { }
+            catch { if !Task.isCancelled { self.error = error.localizedDescription } }
+            tableDownload = nil
+        }
+    }
+
 }
