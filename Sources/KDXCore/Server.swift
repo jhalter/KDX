@@ -229,7 +229,7 @@ public struct ServerLog: Identifiable, Sendable {
             return
         }
         guard let user = peers[id]?.user else { throw KDXError.remote(0x10014) }
-        if [UInt32(502), 505, 507, 508, 509, 511, 512, 550].contains(message.type) {
+        if [UInt32(502), 504, 505, 507, 508, 509, 511, 512, 550].contains(message.type) {
             try await handleAccounts(message, id: id, wire: wire)
             return
         }
@@ -335,7 +335,10 @@ extension KDXServer {
         configuration = candidate
     }
     private func validateGrant(_ account: ServerAccount, requester: Peer?) throws {
-        let granted = account.effective(in: configuration.accountClasses), allowed = privileges(for: requester)
+        try validateGrant(account.effective(in: configuration.accountClasses), requester: requester)
+    }
+    private func validateGrant(_ granted: AccountPrivileges, requester: Peer?) throws {
+        let allowed = privileges(for: requester)
         if allowed.contains(0) { return }
         for bit in 0..<128 where granted.contains(bit) && !allowed.contains(bit) {
             if bit == 3 || bit == 36 || (bit == 23 && allowed.contains(24)) { continue }
@@ -354,6 +357,18 @@ extension KDXServer {
             try requirePrivilege(50, peer: requester)
             guard b.count == 1, let entry = configuration.accountClasses.first(where: { $0.id == b[0] }) else { throw KDXError.remote(0x10002) }
             try await wire.send(type: 503, payload: entry.encode(info: true), transaction: tx, reply: true)
+        case 504:
+            try requirePrivilege(52, peer: requester)
+            var entry = try AccountClass.decode(b, info: true).0
+            guard !entry.name.isEmpty, let index = configuration.accountClasses.firstIndex(where: { $0.id == entry.id }) else { throw KDXError.remote(0x10002) }
+            try validateGrant(entry.privileges, requester: requester)
+            entry.time = ServerAccount.now
+            var candidate = configuration; candidate.accountClasses[index] = entry
+            try commitConfiguration(candidate)
+            let changed = peers.keys.filter { peers[$0]?.parent == nil && (peers[$0]?.account?.classID ?? 2) == entry.id }
+            try await refreshPeerAccess(changed)
+            try await wire.send(type: 1, payload: [UInt32(0), message.type].flatMap(\.beBytes), transaction: tx, reply: true)
+            record("Updated account class \(entry.name)")
         case 512:
             try requirePrivilege(50, peer: requester)
             let entries = configuration.accounts.map { account in
@@ -382,35 +397,9 @@ extension KDXServer {
             try commitConfiguration(candidate)
             // Keep authenticated sessions' ciphers, but apply the new identity and rights immediately.
             let changed = creating ? [] : peers.keys.filter { peers[$0]?.account?.login == record.editor }
-            var departures: [(UInt32, UInt32, WireConnection)] = []
-            for peerID in changed {
-                let oldRooms = peers[peerID]?.joined ?? []
-                peers[peerID]?.account = account
-                let effective = account.effective(in: configuration.accountClasses)
-                if !effective.contains(30) { peers[peerID]?.joined = [] }
-                else { peers[peerID]?.joined = Set(oldRooms.filter { room in
-                    configuration.chats.first { $0.id == room }.map { ChatRecord.permits($0.joinClasses, classID: account.classID) } ?? false
-                }) }
-                if let peer = peers[peerID], let userID = peer.user?.id {
-                    for roomID in oldRooms.subtracting(peer.joined) { departures.append((roomID, userID, peer.wire)) }
-                }
-                for attached in peers.values where attached.parent == peerID { attached.wire.close() }
-                if var user = peers[peerID]?.user {
-                    user.isAdmin = effective.contains(0)
-                    if !effective.contains(60) { user.nickname = account.name }
-                    peers[peerID]?.user = user
-                    if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = user }
-                }
-            }
+            for peerID in changed { peers[peerID]?.account = account }
+            try await refreshPeerAccess(changed)
             try await wire.send(type: 1, payload: [UInt32(0), message.type].flatMap(\.beBytes), transaction: tx, reply: true)
-            for (roomID, userID, departingWire) in departures { await notifyDeparture(roomID: roomID, userID: userID, wire: departingWire) }
-            for peerID in changed {
-                if let peer = peers[peerID], let user = peer.user {
-                    await broadcast(type: 102, payload: try user.encode())
-                    let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: privileges(for: peer).contains(61), sessionKey: peer.sessionKey)
-                    _ = try? await peer.wire.send(type: 105, payload: info.encode())
-                }
-            }
             recordLogAccount(creating ? "Created" : "Updated", login: account.login)
         case 508:
             try requirePrivilege(52, peer: requester)
@@ -429,6 +418,35 @@ extension KDXServer {
             for peerID in peers.keys where peers[peerID]?.account?.login == login { peers[peerID]?.account = candidate.accounts[index] }
             try await wire.send(type: 551, transaction: tx, reply: true)
         default: throw KDXError.remote(0x10004)
+        }
+    }
+    private func refreshPeerAccess(_ changed: [UUID]) async throws {
+        var departures: [(UInt32, UInt32, WireConnection)] = []
+        for peerID in changed {
+            let oldRooms = peers[peerID]?.joined ?? []
+            let effective = privileges(for: peers[peerID]), classID = peers[peerID]?.account?.classID ?? 2
+            if !effective.contains(30) { peers[peerID]?.joined = [] }
+            else { peers[peerID]?.joined = Set(oldRooms.filter { room in
+                configuration.chats.first { $0.id == room }.map { ChatRecord.permits($0.joinClasses, classID: classID) } ?? false
+            }) }
+            if let peer = peers[peerID], let userID = peer.user?.id {
+                for roomID in oldRooms.subtracting(peer.joined) { departures.append((roomID, userID, peer.wire)) }
+            }
+            for attached in peers.values where attached.parent == peerID { attached.wire.close() }
+            if var user = peers[peerID]?.user {
+                user.isAdmin = effective.contains(0)
+                if !effective.contains(60) { user.nickname = peers[peerID]?.account?.name ?? "Guest" }
+                peers[peerID]?.user = user
+                if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = user }
+            }
+        }
+        for (roomID, userID, departingWire) in departures { await notifyDeparture(roomID: roomID, userID: userID, wire: departingWire) }
+        for peerID in changed {
+            if let peer = peers[peerID], let user = peer.user {
+                await broadcast(type: 102, payload: try user.encode())
+                let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: privileges(for: peer).contains(61), sessionKey: peer.sessionKey)
+                _ = try? await peer.wire.send(type: 105, payload: info.encode())
+            }
         }
     }
     private func recordLogAccount(_ action: String, login: String) { record("\(action) account \(login)") }

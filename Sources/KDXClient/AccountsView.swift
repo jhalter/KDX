@@ -4,6 +4,7 @@ import KDXCore
 struct AccountsView: View {
     let client: KDXClient
     @State private var error: String?
+    @State private var editingClass: AccountClass?
     @State private var editing: RemoteAccount?
     @State private var originalLogin: String?
     @State private var deleting: AccountListEntry?
@@ -14,6 +15,11 @@ struct AccountsView: View {
                 Text("Accounts").font(.title2.bold())
                 Spacer()
                 Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
+                Menu("Classes", systemImage: "person.3") {
+                    ForEach(client.accountClasses) { entry in
+                        Button(entry.name) { perform { editingClass = try await client.accountClass(id: entry.id) } }
+                    }
+                }.disabled(client.accountClasses.isEmpty)
                 Button("New Account", systemImage: "person.badge.plus") {
                     originalLogin = nil; editing = RemoteAccount()
                 }
@@ -36,6 +42,7 @@ struct AccountsView: View {
         }.disabled(busy)
         .overlay(alignment: .bottom) { if busy { ProgressView().padding() } }
         .task { refresh() }
+        .sheet(item: $editingClass) { AccountClassEditor(client: client, entry: $0) { refresh() } }
         .sheet(item: $editing) { account in
             AccountEditor(client: client, initial: account, originalLogin: originalLogin) { refresh() }
         }
@@ -143,5 +150,41 @@ struct ChangePasswordView: View {
             }
         }.textFieldStyle(.roundedBorder).padding(24).frame(width: 420).disabled(busy)
         .alert("Password", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") { error = nil } } message: { Text(error ?? "") }
+    }
+}
+
+private struct AccountClassEditor: View {
+    let client: KDXClient
+    @State var entry: AccountClass
+    let onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var busy = false
+    @State private var error: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit Account Class").font(.title2.bold())
+            Text("Changes apply immediately to users in this class. Individual account overrides still apply.").font(.callout).foregroundStyle(.secondary)
+            Form {
+                TextField("Class name", text: $entry.name)
+                Section("Permissions") {
+                    ForEach(AccountPrivileges.editable, id: \.bit) { privilege in
+                        Toggle(privilege.name, isOn: Binding(get: { entry.privileges.contains(privilege.bit) }, set: { entry.privileges.set(privilege.bit, $0) }))
+                    }
+                }
+            }.formStyle(.grouped)
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(busy ? "Saving…" : "Save") {
+                    busy = true
+                    Task {
+                        defer { busy = false }
+                        do { try await client.updateAccountClass(entry); onSave(); dismiss() }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }.buttonStyle(.borderedProminent).disabled(entry.name.isEmpty)
+            }
+        }.padding().frame(width: 540, height: 640).disabled(busy)
+        .alert("Account Class", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") { error = nil } } message: { Text(error ?? "") }
     }
 }

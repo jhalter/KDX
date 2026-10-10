@@ -239,6 +239,18 @@ import Observation
         guard response.type == 506 else { throw KDXError.invalid("Unexpected account-class reply.") }
         accountClasses = try AccountClass.decodeList(response.payload)
     }
+    public func accountClass(id: UInt8) async throws -> AccountClass {
+        let response = try await request(type: 502, payload: [id])
+        guard response.type == 503 else { throw KDXError.invalid("Unexpected account-class information.") }
+        let entry = try AccountClass.decode(response.payload, info: true).0
+        guard entry.id == id else { throw KDXError.invalid("Unexpected account class in reply.") }
+        return entry
+    }
+    public func updateAccountClass(_ entry: AccountClass) async throws {
+        guard !entry.name.isEmpty else { throw KDXError.invalid("Enter an account class name.") }
+        let response = try await request(type: 504, payload: entry.encode(info: true, padded: false))
+        try checkMutation(response, type: 504)
+    }
     public func account(login: String) async throws -> RemoteAccount {
         let response = try await request(type: 509, payload: Array(login.utf8))
         guard response.type == 510 else { throw KDXError.invalid("Unexpected account reply.") }

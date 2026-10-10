@@ -52,13 +52,13 @@ public struct AccountClass: Identifiable, Codable, Equatable, Sendable {
         AccountClass(id: 1, name: "Member", privileges: .enabled([10,11,30,31,32,35,40,53,60,70,71,74])),
         AccountClass(id: 2, name: "Guest", privileges: .enabled([10,30,31,32,60,70]))
     ]
-    func encode(info: Bool) throws -> [UInt8] {
+    func encode(info: Bool, padded: Bool = true) throws -> [UInt8] {
         let indexAt = info ? 48 : 40, name = try shortText(name)
         guard id < 32, afterIndex.count == 3 else { throw KDXError.invalid("Invalid account class.") }
         var out = [UInt8](repeating: 0, count: indexAt + 8)
         out.replaceSubrange(0..<16, with: privileges.bytes); out.put(time, at: 16); out[37] = unknown25
         out[indexAt] = id; out.replaceSubrange(indexAt+1..<indexAt+4, with: afterIndex); out[indexAt+4] = UInt8(name.count)
-        out += name; out.pad(4); return out
+        out += name; if padded { out.pad(4) }; return out
     }
     static func decode(_ b: [UInt8], info: Bool) throws -> (Self, Int) {
         let indexAt = info ? 48 : 40
