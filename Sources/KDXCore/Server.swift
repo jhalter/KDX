@@ -73,6 +73,8 @@ public struct ServerLog: Identifiable, Sendable {
     struct Peer {
         let wire: WireConnection
         var user: KDXUser?
+        var loginTime: UInt64 = 0
+        var lastActivity: UInt64 = 0
         var account: ServerAccount?
         var sessionKey: [UInt8] = []
         var joined: Set<UInt32> = []
@@ -198,6 +200,7 @@ public struct ServerLog: Identifiable, Sendable {
             try await handleTransfer(message, wire: wire, parent: parent)
             return
         }
+        if message.type != 108 { peers[id]?.lastActivity = ServerAccount.now }
         if message.type == 100 {
             var (user, _) = try KDXUser.decode(b)
             guard !user.nickname.isEmpty else { throw KDXError.remote(0x1000a) }
@@ -206,15 +209,18 @@ public struct ServerLog: Identifiable, Sendable {
             user.id = old?.id ?? nextUser
             if old == nil { nextUser = nextUser &+ 1; if nextUser == 0 { nextUser = 1 } }
             user.isAdmin = privileges(for: peers[id]).contains(0)
+            user.server15 = 0; user.server16 = 0; user.flags &= 4; user.extra = []
+            user.info.unicodeScalars.removeAll { $0.value == 13 || $0.value == 10 || $0.value == 9 }
             if !privileges(for: peers[id]).contains(60) { user.nickname = peers[id]?.account?.name ?? "Guest" }
             peers[id]?.user = user; users.removeAll { $0.id == user.id }; users.append(user)
             if old == nil {
+                peers[id]?.loginTime = ServerAccount.now
                 let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: privileges(for: peers[id]).contains(61), sessionKey: peers[id]?.sessionKey ?? [])
                 try await wire.send(type: 105, payload: info.encode())
                 try await wire.send(type: 101, payload: KDXUser.encodeList(users))
                 record("\(user.nickname) connected")
             }
-            await broadcast(type: old == nil ? 103 : 102, payload: try user.encode(), excluding: id)
+            await broadcast(type: old == nil ? 103 : 102, payload: try user.encode(), excluding: old == nil ? id : nil)
             return
         }
         guard let user = peers[id]?.user else { throw KDXError.remote(0x10014) }
@@ -223,6 +229,21 @@ public struct ServerLog: Identifiable, Sendable {
             return
         }
         switch message.type {
+        case 110:
+            try b.require(4)
+            if user.status != b[0] {
+                var updated = user; updated.status = b[0]; peers[id]?.user = updated
+                if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = updated }
+                await broadcast(type: 111, payload: user.id.beBytes + [b[0],0,0,0])
+            }
+        case 152:
+            try requirePrivilege(40, peer: peers[id]); try b.require(4)
+            guard let target = peers.values.first(where: { $0.user?.id == b.u32(0) }), let targetUser = target.user else { throw KDXError.remote(0x1000c) }
+            let details = UserInformation(id: targetUser.id, loginTime: target.loginTime, time18: target.lastActivity,
+                                          address: target.wire.endpointDescription, nickname: targetUser.nickname,
+                                          name3f: target.account?.name ?? "Guest", login: target.account?.login ?? "guest",
+                                          name41: configuration.accountClasses.first { $0.id == (target.account?.classID ?? 2) }?.name ?? "")
+            try await wire.send(type: 153, payload: details.encode(), transaction: tx, reply: true)
         case 108: try await wire.send(type: 109, transaction: tx, reply: true)
         case 115:
             let address = Array(wire.endpointDescription.utf8.prefix(255))

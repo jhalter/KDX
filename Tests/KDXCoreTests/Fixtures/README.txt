@@ -23,3 +23,7 @@ come from their parents' captured 105 Server Info records.
 probe-48784/48796 use the same reference commit and license. They cover
 upload metadata, resume reply, both data records, and completion. The
 attachment key comes from the parent session's 105 Server Info record.
+
+probe-50984.*.bin uses the same reference commit, license, and public lab
+password. It includes a detailed 153 User Info record. The original
+first-connect fixture also verifies complete user identity/list records.

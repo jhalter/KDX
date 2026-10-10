@@ -7,7 +7,16 @@ public enum KDXError: Error, LocalizedError, Sendable {
         case .invalid(let reason): reason
         case .disconnected: "The connection closed."
         case .authentication: "Authentication failed. Check the account and password."
-        case .remote(let code): "Server error 0x\(String(code, radix: 16))."
+        case .remote(let code):
+            switch code {
+            case 0x10014: "You do not have permission for this action."
+            case 0x1000c: "The requested item or user is no longer available."
+            case 0x1000d, 0x30073: "An item with this name already exists. Choose a different name."
+            case 0x10004: "The server does not support this action."
+            case 0x40074: "The uploaded data did not match its declared size."
+            case 0x640005: "You cannot grant permissions that your own account does not have."
+            default: "Server error 0x\(String(code, radix: 16))."
+            }
         }
     }
 }

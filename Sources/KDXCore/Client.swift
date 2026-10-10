@@ -7,6 +7,7 @@ import Observation
     public private(set) var isConnecting = false
     public private(set) var serverInfo: ServerInfo?
     public private(set) var users: [KDXUser] = []
+    public var currentUser: KDXUser? { users.first { $0.id == serverInfo?.userID } }
     public private(set) var rooms: [ChatRoom] = []
     public private(set) var chat: [ChatLine] = []
     public private(set) var joinedRoom: UInt32?
@@ -45,13 +46,13 @@ import Observation
     private var pending: [UInt32: PendingRequest] = [:]
     var requestTimeout: Duration = .seconds(15)
     public init() {}
-    public func connect(host: String, port: UInt16, login: String, password: String, nickname: String, table: ChallengeTable) async throws {
+    public func connect(host: String, port: UInt16, login: String, password: String, nickname: String, info: String = "", table: ChallengeTable) async throws {
         let wire = try WireConnection(host: host, port: port)
-        try await connect(wire: wire, login: login, password: password, nickname: nickname, table: table)
+        try await connect(wire: wire, login: login, password: password, nickname: nickname, info: info, table: table)
         guard connection === wire else { throw KDXError.disconnected }
         transferFactory = { try WireConnection(host: host, port: port) }
     }
-    func connect(wire: WireConnection, login: String, password: String, nickname: String, table: ChallengeTable) async throws {
+    func connect(wire: WireConnection, login: String, password: String, nickname: String, info: String = "", table: ChallengeTable) async throws {
         disconnect()
         self.table = table; sessionLogin = login
         connection = wire; isConnecting = true; state = "Connecting…"; lastError = nil
@@ -60,7 +61,7 @@ import Observation
             guard connection === wire else { throw KDXError.disconnected }
             state = "Authenticating…"
             try await wire.authenticateClient(name: Array(login.utf8), key: AccountKey(password: password), table: table)
-            try await wire.send(type: 100, payload: KDXUser(nickname: nickname.isEmpty ? (login.isEmpty ? "Guest" : login) : nickname).encode())
+            try await wire.send(type: 100, payload: KDXUser(nickname: nickname.isEmpty ? (login.isEmpty ? "Guest" : login) : nickname, info: info).encode())
             let timeout = Task { try? await Task.sleep(for: .seconds(15)); if !Task.isCancelled { wire.close() } }
             defer { timeout.cancel() }
             var gotUsers = false
@@ -145,6 +146,21 @@ import Observation
     private func failRequest(_ transaction: UInt32, token: UUID, error: Error) {
         guard pending[transaction]?.token == token, let request = pending.removeValue(forKey: transaction) else { return }
         request.timeout?.cancel(); request.continuation.resume(throwing: error)
+    }
+    public func updateProfile(nickname: String, info: String) async throws {
+        guard var user = currentUser else { throw KDXError.disconnected }
+        guard !nickname.isEmpty else { throw KDXError.invalid("Enter a nickname.") }
+        user.id = 0; user.nickname = nickname; user.info = info
+        user.badge = 0; user.server15 = 0; user.server16 = 0; user.flags &= 4
+        try await sendChecked(type: 100, payload: user.encode())
+    }
+    public func setStatus(_ status: UInt8) async throws {
+        try await sendChecked(type: 110, payload: [status,0,0,0])
+    }
+    public func userInformation(id: UInt32) async throws -> UserInformation {
+        let response = try await request(type: 152, payload: id.beBytes)
+        guard response.type == 153 else { throw KDXError.invalid("Unexpected user-information reply.") }
+        return try UserInformation.decode(response.payload)
     }
     public func refreshRooms() async throws {
         let response = try await request(type: 214)
@@ -394,6 +410,9 @@ import Observation
             if joinedRoom == roomID { joinedRoom = nil; chatWindow = nil }
 
         case 105: serverInfo = try ServerInfo.decode(b)
+        case 111:
+            try b.require(8)
+            if let index = users.firstIndex(where: { $0.id == b.u32(0) }) { users[index].status = b[4] }
         case 208:
             try b.require(12)
             guard b.u32(0) == joinedRoom else { return }

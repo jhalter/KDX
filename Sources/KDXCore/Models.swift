@@ -5,23 +5,39 @@ public struct KDXUser: Identifiable, Sendable, Equatable {
     public var nickname: String
     public var info: String = ""
     public var status: UInt8 = 0
-    public var isAdmin: Bool = false
+    public var voicePort: UInt16 = 0
+    public var colors: [UInt8] = [0,0,0,0,0,0]
+    public var badge: UInt8 = 0
+    public var server15: UInt8 = 0
+    public var server16: UInt8 = 0
+    public var flags: UInt8 = 0
+    public var icon: [UInt8] = []
+    public var extra: [UInt8] = []
+    public var isAdmin: Bool {
+        get { badge == 255 }
+        set { badge = newValue ? 255 : 0 }
+    }
     public init(id: UInt32 = 0, nickname: String, info: String = "", isAdmin: Bool = false) {
         self.id = id; self.nickname = nickname; self.info = info; self.isAdmin = isAdmin
     }
     func encode() throws -> [UInt8] {
         let nick = try shortText(nickname), info = try shortText(info)
+        guard colors.count == 6, icon.count <= 0x708, extra.count <= 255, info.count <= 127 else { throw KDXError.invalid("Invalid user profile or icon size.") }
         var out = [UInt8](repeating: 0, count: 28)
-        out.put(id, at: 0); out[4] = status; out[20] = isAdmin ? 255 : 0
-        out[25] = UInt8(nick.count); out[26] = UInt8(info.count)
-        return out + nick + info
+        out.put(id, at: 0); out[4] = status; out.put(voicePort, at: 10); out.put(UInt16(icon.count), at: 12)
+        out.replaceSubrange(14..<20, with: colors); out[20] = badge; out[21] = server15; out[22] = server16; out[23] = flags
+        out[24] = UInt8(extra.count); out[25] = UInt8(nick.count); out[26] = UInt8(info.count)
+        return out + icon + extra + nick + info
     }
     static func decode(_ b: [UInt8]) throws -> (KDXUser, Int) {
         try b.require(28)
         let at = 28 + Int(b.u16(12)) + Int(b[24]), end = at + Int(b[25]) + Int(b[26])
         try b.require(end)
         var user = KDXUser(id: b.u32(0), nickname: b.text(at..<at+Int(b[25])), info: b.text(at+Int(b[25])..<end), isAdmin: b[20] == 255)
-        user.status = b[4]
+        guard b.u16(12) <= 0x708, b[26] <= 127 else { throw KDXError.invalid("Invalid user profile or icon size.") }
+        user.status = b[4]; user.voicePort = b.u16(10); user.colors = Array(b[14..<20])
+        user.badge = b[20]; user.server15 = b[21]; user.server16 = b[22]; user.flags = b[23]
+        user.icon = Array(b[28..<28+Int(b.u16(12))]); user.extra = Array(b[28+Int(b.u16(12))..<at])
         return (user, end)
     }
     static func list(_ b: [UInt8]) throws -> [KDXUser] {

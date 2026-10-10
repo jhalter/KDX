@@ -16,6 +16,7 @@ struct ClientView: View {
     @AppStorage("client.port") private var port = "10700"
     @AppStorage("client.login") private var login = ""
     @AppStorage("client.nickname") private var nickname = ""
+    @AppStorage("client.info") private var profileInfo = ""
     @State private var password = ""
     @State private var draft = ""
     @State private var error: String?
@@ -28,6 +29,8 @@ struct ClientView: View {
     @State private var newsBody = ""
     @State private var posting = false
     @State private var changingPassword = false
+    @State private var editingProfile = false
+    @State private var inspectingUser: KDXUser?
     @State private var recipient: UInt32?
     @State private var editingChat: ChatRecord?
     @State private var deletingChat: ChatRoom?
@@ -61,6 +64,8 @@ struct ClientView: View {
                             }
                     }
                     Spacer()
+                    Button("My Profile…", systemImage: "person.crop.circle") { editingProfile = true }
+                    Toggle("Away", isOn: Binding(get: { client.currentUser?.status == 1 }, set: { value in perform { try await client.setStatus(value ? 1 : 0) } }))
                     Button("Change Password…", systemImage: "key") { changingPassword = true }
                     Button("Disconnect", systemImage: "eject") { client.disconnect() }
                 } else {
@@ -91,6 +96,10 @@ struct ClientView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
         }
+        .sheet(isPresented: $editingProfile) { ProfileEditorView(client: client) }
+        .sheet(item: $inspectingUser) { UserInformationView(client: client, user: $0) }
+        .onChange(of: client.currentUser?.nickname) { _, value in if let value, client.isConnected { nickname = value } }
+        .onChange(of: client.currentUser?.info) { _, value in if let value, client.isConnected { profileInfo = value } }
         .sheet(item: $editingChat) { ChatEditorView(client: client, room: $0) }
         .sheet(isPresented: $editingTopic) { ChatTopicEditor(client: client, topic: client.chatTopics[client.joinedRoom ?? 0]?.text ?? "") }
         .confirmationDialog("Delete Chat Room", isPresented: Binding(get: { deletingChat != nil }, set: { if !$0 { deletingChat = nil } }), titleVisibility: .visible) {
@@ -241,17 +250,25 @@ struct ClientView: View {
                 Text("ONLINE · \(client.users.count)").font(.caption.bold()).foregroundStyle(.secondary).padding([.horizontal,.top])
                 List(client.users) { user in
                     HStack {
-                        Image(systemName: user.isAdmin ? "person.badge.key.fill" : "person.fill"); Text(user.nickname); Spacer()
+                        Image(systemName: user.isAdmin ? "person.badge.key.fill" : "person.fill")
+                        VStack(alignment: .leading) {
+                            Text(user.nickname)
+                            if user.status == 1 { Text("Away").font(.caption).foregroundStyle(.secondary) }
+                        }
+                        Spacer()
                         if client.chatWindow?.members.contains(user.id) == true { Image(systemName: "bubble.left.fill").font(.caption).foregroundStyle(.secondary).help("In this room") }
                     }
-                        .contextMenu { if user.id != client.serverInfo?.userID { Button("Private Message") { recipient = user.id } } }
+                        .contextMenu {
+                            Button("User Information…") { inspectingUser = user }
+                            if user.id != client.serverInfo?.userID { Button("Private Message") { recipient = user.id } }
+                        }
                 }.listStyle(.sidebar)
             }.frame(width: 190)
         }
     }
     private func connect() {
         guard let value = UInt16(port), value > 0 else { error = "Enter a port between 1 and 65535."; return }
-        perform { try await client.connect(host: host, port: value, login: login, password: password, nickname: nickname, table: KDXStorage.loadTable()) }
+        perform { try await client.connect(host: host, port: value, login: login, password: password, nickname: nickname, info: profileInfo, table: KDXStorage.loadTable()) }
     }
     private func send() {
         let text = draft
