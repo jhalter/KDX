@@ -32,6 +32,7 @@ struct ClientView: View {
     }
     @State private var error: String?
     @State private var viewingHistory = false
+    @State private var viewingConnections = false
     @State private var editingServerSettings = false
     @State private var viewingGreeting = false
     @State private var inspectingFile: FileInspection?
@@ -58,6 +59,7 @@ struct ClientView: View {
     @State private var editingTopic = false
     var body: some View {
         NavigationSplitView {
+            ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Label("KDX", systemImage: "network").font(.largeTitle.bold())
                 Label(client.state, systemImage: client.isConnected ? "circle.fill" : "circle")
@@ -115,6 +117,7 @@ struct ClientView: View {
                         }.frame(maxHeight: 180)
                     }
                     Spacer()
+                    Button("Connections…", systemImage: "network") { viewingConnections = true }
                     Button("Server History…", systemImage: "clock.arrow.circlepath") { viewingHistory = true }
                     Button("Show Greeting…") { viewingGreeting = true }
                     if client.serverInfo?.canModifySettings == true { Button("Server Settings…") { editingServerSettings = true } }
@@ -149,7 +152,8 @@ struct ClientView: View {
                     Button("Import KDX Binary or Table…") { importing = true }
                     Text("Select an uncompressed original KDX program, or a challenge-table.bin exported by the reference client.").font(.caption).foregroundStyle(.secondary)
                 }
-            }.padding().navigationSplitViewColumnWidth(min: 260, ideal: 290)
+            }.padding().frame(maxWidth: .infinity, alignment: .leading)
+            }.navigationSplitViewColumnWidth(min: 260, ideal: 290)
         } detail: {
             if client.isConnected { if section == "Files" { fileBrowser } else if section == "News" { newsBrowser } else if section == "Accounts" { AccountsView(client: client) } else { conversation } }
             else {
@@ -162,6 +166,7 @@ struct ClientView: View {
         .onChange(of: client.isConnected) { _, connected in
             if !connected { roomDrafts = [:]; privateDrafts = [:]; recipient = nil }
         }
+        .sheet(isPresented: $viewingConnections) { ConnectionMonitorView(client: client) }
         .sheet(isPresented: $viewingHistory) { ServerHistoryView(client: client) }
         .sheet(isPresented: $editingServerSettings) { ServerSettingsView(client: client) }
         .sheet(isPresented: $viewingGreeting) { ServerGreetingView(client: client) }

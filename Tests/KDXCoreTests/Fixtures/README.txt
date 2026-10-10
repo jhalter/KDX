@@ -25,7 +25,7 @@ upload metadata, resume reply, both data records, and completion. The
 attachment key comes from the parent session's 105 Server Info record.
 
 probe-50984.*.bin uses the same reference commit, license, and public lab
-password. It includes a detailed 153 User Info record. The original
+password. It includes a detailed 153 User Info record and a 143 connection-monitor snapshot. The original
 first-connect fixture also verifies complete user identity/list records.
 
 linux-accounts-news-51382.*.bin was extracted from captures/linux-accounts-news.pcapng

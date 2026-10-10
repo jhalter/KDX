@@ -149,6 +149,7 @@ extension ByteTransport {
         let value = nextTransaction; nextTransaction = nextTransaction &+ 1; if nextTransaction == 0 { nextTransaction = 1 }; return value
     }
     @discardableResult func send(type: UInt32, payload: [UInt8] = [], transaction: UInt32? = nil, reply: Bool = false) async throws -> UInt32 {
+        try Task.checkCancellation()
         guard let cipher else { throw KDXError.authentication }
         let id = transaction ?? allocateTransaction()
         try await write(cipher.seal(Message(transaction: id, type: type, isReply: reply, payload: payload)))

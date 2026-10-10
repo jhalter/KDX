@@ -100,6 +100,7 @@ public struct ServerLog: Identifiable, Sendable {
         var sessionKey: [UInt8] = []
         var joined: Set<UInt32> = []
         var loginAttempt: String?
+        var monitoringConnections = false
         var historyJoined = false
         var historySending = false
         var historyCursor: UInt64 = 0
@@ -213,7 +214,7 @@ public struct ServerLog: Identifiable, Sendable {
                 let detail = historyDetail(message)
                 do {
                     try await handle(message, id: id, wire: wire)
-                    if ![UInt32(100),108,115,180,207,300,412,415].contains(message.type) { appendHistory(kind: message.type, peer: actor, detail: detail) }
+                    if ![UInt32(100),108,115,140,141,142,180,207,300,412,415].contains(message.type) { appendHistory(kind: message.type, peer: actor, detail: detail) }
                 }
                 catch {
                     let code: UInt32
@@ -289,6 +290,20 @@ public struct ServerLog: Identifiable, Sendable {
                 if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = updated }
                 await broadcast(type: 111, payload: user.id.beBytes + [b[0],0,0,0])
             }
+        case 140:
+            try requirePrivilege(40, peer: peers[id]); peers[id]?.monitoringConnections = true
+        case 141:
+            peers[id]?.monitoringConnections = false
+        case 142:
+            try requirePrivilege(40, peer: peers[id])
+            guard peers[id]?.monitoringConnections == true else { throw KDXError.remote(0x10003) }
+            let entries = peers.values.compactMap { peer -> MonitoredConnection? in
+                guard let user = peer.user else { return nil }
+                return MonitoredConnection(userID: user.id, nickname: user.nickname, login: peer.account?.login ?? "guest",
+                                           accountName: peer.account?.name ?? "Guest", address: peer.wire.endpointDescription,
+                                           loginTime: peer.loginTime, lastActivity: peer.lastActivity)
+            }.sorted { $0.userID < $1.userID }
+            try await wire.send(type: 143, payload: MonitoredConnection.encodeList(entries), transaction: tx, reply: true)
         case 180:
             try requirePrivilege(63, peer: peers[id])
             appendHistory(kind: 180, peer: peers[id])
@@ -572,6 +587,7 @@ extension KDXServer {
         for peerID in changed {
             let oldRooms = peers[peerID]?.joined ?? []
             let effective = privileges(for: peers[peerID]), classID = peers[peerID]?.account?.classID ?? 2
+            if !effective.contains(40) { peers[peerID]?.monitoringConnections = false }
             if !effective.contains(30) { peers[peerID]?.joined = [] }
             else { peers[peerID]?.joined = Set(oldRooms.filter { room in
                 (try? chatRecord(room)).map { ChatRecord.permits($0.joinClasses, classID: classID) } ?? false

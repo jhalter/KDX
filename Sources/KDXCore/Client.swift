@@ -23,6 +23,7 @@ import Observation
     public private(set) var chatInvitations: [ChatInvitation] = []
     public private(set) var history: [RemoteHistoryEntry] = []
     public private(set) var isViewingHistory = false
+    private var connectionMonitorToken: UUID?
     private var historyLoadToken: UUID?
     private var historyLoaded = false
     public private(set) var greeting: String?
@@ -128,6 +129,7 @@ import Observation
     }
     public func disconnect() {
         activeTransfer?.close(); activeTransfer = nil; transferFactory = nil; table = nil
+        connectionMonitorToken = nil
         history = []; isViewingHistory = false; historyLoadToken = nil; historyLoaded = false
         accounts = []; accountClasses = []; sessionLogin = ""
         files = []; filePath = []; transferStatus = nil; newsGroups = []; newsPosts = []; newsPermissions = 0; newsGroupID = nil; newsLoadToken = nil; checkedOperations = [:]
@@ -221,6 +223,28 @@ import Observation
         let response = try await request(type: 152, payload: id.beBytes)
         guard response.type == 153 else { throw KDXError.invalid("Unexpected user-information reply.") }
         return try UserInformation.decode(response.payload)
+    }
+    public func connectionMonitor() async throws -> [MonitoredConnection] {
+        try Task.checkCancellation()
+        guard let wire = connection, isConnected else { throw KDXError.disconnected }
+        guard connectionMonitorToken == nil else { throw KDXError.invalid("The connection monitor is already refreshing.") }
+        let token = UUID(); connectionMonitorToken = token
+        defer { if connectionMonitorToken == token { connectionMonitorToken = nil } }
+        do {
+            try await sendChecked(type: 140, payload: [])
+            let reply = try await request(type: 142)
+            guard reply.type == 143 else { throw KDXError.invalid("Unexpected connection-monitor reply.") }
+            let entries = try MonitoredConnection.decodeList(reply.payload)
+            try await sendChecked(type: 141, payload: [])
+            return entries
+        } catch {
+            // Cleanup must run outside a cancelled caller's task, and only on this session.
+            try? await Task { @MainActor in
+                guard self.connection === wire else { return }
+                try await self.sendChecked(type: 141, payload: [])
+            }.value
+            throw error
+        }
     }
     public func refreshRooms() async throws {
         let response = try await request(type: 214)

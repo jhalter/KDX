@@ -29,7 +29,7 @@ public struct AccountPrivileges: Codable, Equatable, Sendable {
     public static let editable: [(bit: Int, name: String)] = [
         (0, "Administrator override"), (10, "Download files"), (11, "Upload files"), (20, "View file attributes"),
         (30, "Join chats"), (31, "Send chat"), (32, "Send private messages"), (35, "Set chat topics"),
-        (33, "Send broadcasts"), (34, "Create private chats"), (37, "Manage chats"), (40, "View user information"), (41, "Disconnect users"), (42, "Cannot be disconnected remotely"),
+        (33, "Send broadcasts"), (34, "Create private chats"), (37, "Manage chats"), (40, "View user information and connections"), (41, "Disconnect users"), (42, "Cannot be disconnected remotely"),
         (50, "View accounts"), (51, "Create accounts"), (52, "Modify accounts"),
         (53, "Change own password"), (54, "Protect account from non-administrators"),
         (60, "Use any nickname"), (61, "Modify server settings"), (62, "Skip greeting on login"), (63, "View server history"), (70, "Read news"),
