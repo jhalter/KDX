@@ -32,7 +32,7 @@ public struct AccountPrivileges: Codable, Equatable, Sendable {
         (33, "Send broadcasts"), (34, "Create private chats"), (37, "Manage chats"), (40, "View user information"), (41, "Disconnect users"), (42, "Cannot be disconnected remotely"),
         (50, "View accounts"), (51, "Create accounts"), (52, "Modify accounts"),
         (53, "Change own password"), (54, "Protect account from non-administrators"),
-        (60, "Use any nickname"), (61, "Modify server settings"), (62, "Skip greeting on login"), (70, "Read news"),
+        (60, "Use any nickname"), (61, "Modify server settings"), (62, "Skip greeting on login"), (63, "View server history"), (70, "Read news"),
         (71, "Post news"), (72, "Delete any news post"), (73, "Manage newsgroups")
     ]
 }
@@ -48,7 +48,7 @@ public struct AccountClass: Identifiable, Codable, Equatable, Sendable {
         self.id = id; self.name = name; self.privileges = privileges
     }
     public static let defaults: [AccountClass] = [
-        AccountClass(id: 0, name: "Administrator", privileges: .enabled([0,10,11,20,30,31,32,33,34,35,37,40,41,50,51,52,53,60,61,70,71,72,73,74])),
+        AccountClass(id: 0, name: "Administrator", privileges: .enabled([0,10,11,20,30,31,32,33,34,35,37,40,41,50,51,52,53,60,61,63,70,71,72,73,74])),
         AccountClass(id: 1, name: "Member", privileges: .enabled([10,11,20,30,31,32,34,35,40,53,60,70,71,74])),
         AccountClass(id: 2, name: "Guest", privileges: .enabled([10,30,31,32,60,70]))
     ]

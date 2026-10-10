@@ -87,6 +87,8 @@ public struct ServerLog: Identifiable, Sendable {
     private var activeDownloads: Set<ObjectIdentifier> = []
     private let downloadLimiter = DownloadLimiter()
     private var nextInvitation: UInt32 = 1
+    private var history: [(sequence: UInt64, entry: RemoteHistoryEntry)] = []
+    private var historySequence: UInt64 = 0
     private var nextUser: UInt32 = 1
     private var chatTopics: [UInt32: ChatTopic] = [:]
     struct Peer {
@@ -97,6 +99,10 @@ public struct ServerLog: Identifiable, Sendable {
         var account: ServerAccount?
         var sessionKey: [UInt8] = []
         var joined: Set<UInt32> = []
+        var loginAttempt: String?
+        var historyJoined = false
+        var historySending = false
+        var historyCursor: UInt64 = 0
         var parent: UUID?
     }
     public init(configuration: ServerConfiguration = ServerConfiguration(), configurationURL: URL? = nil) { self.configuration = configuration; self.configurationURL = configurationURL }
@@ -122,6 +128,7 @@ public struct ServerLog: Identifiable, Sendable {
                     switch state {
                     case .ready:
                         self.port = listener.port?.rawValue; self.isRunning = true
+                        self.appendHistory(kind: 190)
                         self.record("Listening on port \(self.port ?? 0)")
                         self.startWaiter?.resume(); self.startWaiter = nil
                     case .failed(let error):
@@ -155,6 +162,7 @@ public struct ServerLog: Identifiable, Sendable {
             catch { lastError = error.localizedDescription; wire.close(); return }
         }
         if downloadLimiter.rate != configuration.downloadLimit { downloadLimiter.setRate(configuration.downloadLimit) }
+        if history.isEmpty { appendHistory(kind: 190) }
         let id = UUID()
         peers[id] = Peer(wire: wire)
         Task { await self.serve(id: id, wire: wire, table: table) }
@@ -170,6 +178,7 @@ public struct ServerLog: Identifiable, Sendable {
                 try await wire.write(hello.encode())
                 guard client.nonce != hello.nonce else { throw KDXError.authentication }
                 let name = String(decoding: client.name, as: UTF8.self)
+                if client.name.first != 0 { peers[id]?.loginAttempt = name.isEmpty ? "guest" : name }
                 let account = configuration.accounts.first { $0.login == (name.isEmpty ? "guest" : name) }
                 let key: AccountKey
                 if client.name.first == 0 {
@@ -200,23 +209,38 @@ public struct ServerLog: Identifiable, Sendable {
                 let message = try await wire.receive(limit: 0x20000)
                 guard peers[id]?.wire === wire else { break }
                 guard !message.isReply else { throw KDXError.invalid("Unexpected client reply.") }
-                do { try await handle(message, id: id, wire: wire) }
+                let actor = peers[id]?.parent.flatMap { peers[$0] } ?? peers[id]
+                let detail = historyDetail(message)
+                do {
+                    try await handle(message, id: id, wire: wire)
+                    if ![UInt32(100),108,115,180,207,300,412,415].contains(message.type) { appendHistory(kind: message.type, peer: actor, detail: detail) }
+                }
                 catch {
                     let code: UInt32
                     if case KDXError.remote(let value) = error { code = value } else { code = 0x1000a }
+                    appendHistory(kind: message.type == 412 ? 186 : message.type == 415 ? 187 : message.type, peer: actor, detail: "Error 0x" + String(code, radix: 16) + (detail.isEmpty ? "" : " · " + detail))
                     try await wire.send(type: 1, payload: [code, message.type, 0, 0, 0, 0].flatMap(\.beBytes), transaction: message.transaction, reply: true)
                     if peers[id]?.parent != nil { throw error }
                 }
+                await publishHistory()
             }
-        } catch { if peers[id] != nil { record("Connection closed: \(error.localizedDescription)") } }
+        } catch {
+            if let peer = peers[id] {
+                if peer.user == nil, peer.parent == nil, peer.loginAttempt != nil { appendHistory(kind: 191, peer: peer) }
+                record("Connection closed: \(error.localizedDescription)")
+            }
+        }
         wire.close()
-        if let user = peers.removeValue(forKey: id)?.user {
+        let departed = peers.removeValue(forKey: id)
+        if let user = departed?.user {
+            appendHistory(kind: 185, peer: departed, detail: departed?.wire.endpointDescription ?? "")
             for peer in peers.values where peer.parent == id { peer.wire.close() }
             users.removeAll { $0.id == user.id }
             removeEmptyPrivateChats()
             await broadcast(type: 104, payload: user.id.beBytes + [7,0,0,0])
             record("\(user.nickname) disconnected")
         }
+        await publishHistory()
     }
     private func handle(_ message: Message, id: UUID, wire: WireConnection) async throws {
         let b = message.payload, tx = message.transaction
@@ -246,8 +270,9 @@ public struct ServerLog: Identifiable, Sendable {
                 let icon = try configuration.remoteSettings().icon
                 if !icon.isEmpty { try await wire.send(type: 106, payload: icon) }
                 try await wire.send(type: 101, payload: KDXUser.encodeList(users))
+                appendHistory(kind: 184, peer: peers[id])
                 record("\(user.nickname) connected")
-            }
+            } else { appendHistory(kind: 100, peer: peers[id]) }
             await broadcast(type: old == nil ? 103 : 102, payload: try user.encode(), excluding: old == nil ? id : nil)
             return
         }
@@ -264,6 +289,15 @@ public struct ServerLog: Identifiable, Sendable {
                 if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = updated }
                 await broadcast(type: 111, payload: user.id.beBytes + [b[0],0,0,0])
             }
+        case 180:
+            try requirePrivilege(63, peer: peers[id])
+            appendHistory(kind: 180, peer: peers[id])
+            peers[id]?.historyJoined = false
+            let snapshot = history.map(\.entry), cursor = historySequence
+            try await wire.send(type: 181, payload: RemoteHistoryEntry.encodeList(snapshot), transaction: tx, reply: true)
+            peers[id]?.historyCursor = cursor; peers[id]?.historyJoined = true
+        case 182:
+            peers[id]?.historyJoined = false
         case 112:
             let text = configuration.greeting.isEmpty ? "(No greeting.)" : configuration.greetingEnabled ? configuration.greeting : "(Greeting disabled.)"
             try await wire.send(type: 107, payload: [0,0,0,0] + Array(text.utf8))
@@ -369,6 +403,7 @@ public struct ServerLog: Identifiable, Sendable {
             try handle.seek(toOffset: offset)
             try await wire.sendFile(type: 414, length: UInt32(size-offset), source: handle, transaction: tx, reply: true, limiter: downloadLimiter)
             try await wire.sendFile(type: 414, length: UInt32(resourceSize-resourceOffset), source: handle, resourceOffset: resourceOffset, limiter: downloadLimiter)
+            appendHistory(kind: 188, peer: parent, detail: path.names.joined(separator: "/"))
             record("Downloaded \(path.names.joined(separator: "/"))")
         case 415:
             try requirePrivilege(11, peer: parent)
@@ -385,8 +420,45 @@ public struct ServerLog: Identifiable, Sendable {
             guard resourceLength == request.resourceSize else { throw KDXError.remote(0x40074) }
             try upload.commit()
             try await wire.send(type: 418)
+            appendHistory(kind: 189, peer: parent, detail: request.strings[0])
             record("Uploaded \(request.strings[0])")
         default: throw KDXError.remote(0x10004)
+        }
+    }
+    private func appendHistory(kind: UInt32, peer: Peer? = nil, detail: String = "") {
+        // Keep UTF-8 fields in their one-byte wire bounds without retaining message/password bodies.
+        func bounded(_ value: String) -> String {
+            var result = ""
+            for scalar in value.unicodeScalars { if result.utf8.count + scalar.utf8.count > 255 { break }; result.unicodeScalars.append(scalar) }
+            return result
+        }
+        let entry = RemoteHistoryEntry(kind: kind, userID: peer?.user?.id ?? 0, address: bounded(peer?.wire.endpointDescription ?? ""),
+                                      nickname: bounded(peer?.user?.nickname ?? ""), login: bounded(peer?.account?.login ?? peer?.loginAttempt ?? (peer == nil ? "" : "guest")), detail: bounded(detail), time: ServerAccount.now)
+        historySequence += 1; history.append((historySequence, entry))
+        if history.count > 500 { history.removeFirst(history.count-500) }
+    }
+    private func historyDetail(_ message: Message) -> String {
+        let b = message.payload
+        switch message.type {
+        case 201,202,204,209,211: return b.count >= 4 ? (try? chatRecord(b.u32(0)).name) ?? "" : ""
+        case 400,409: return (try? RemotePath(wire: b).names.joined(separator: "/")) ?? ""
+        case 412: return (try? DownloadRequest(wire: b).path.names.joined(separator: "/")) ?? ""
+        case 415: return (try? UploadRequest(wire: b).strings[0]) ?? ""
+        default: return ""
+        }
+    }
+    private func publishHistory() async {
+        for id in Array(peers.keys) {
+            guard peers[id]?.historyJoined == true, peers[id]?.historySending == false else { continue }
+            peers[id]?.historySending = true
+            while let peer = peers[id], peer.historyJoined {
+                guard privileges(for: peer).contains(63) else { peers[id]?.historyJoined = false; break }
+                guard let next = history.first(where: { $0.sequence > peer.historyCursor }) else { break }
+                peers[id]?.historyCursor = next.sequence
+                do { try await peer.wire.send(type: 183, payload: next.entry.encode()) }
+                catch { peer.wire.close(); break }
+            }
+            peers[id]?.historySending = false
         }
     }
     private func broadcast(type: UInt32, payload: [UInt8], excluding: UUID? = nil, room: UInt32? = nil) async {

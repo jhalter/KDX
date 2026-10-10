@@ -14,6 +14,10 @@ import Observation
     public private(set) var chatWindow: ChatWindow?
     public private(set) var chatTopics: [UInt32: ChatTopic] = [:]
     public private(set) var chatInvitations: [ChatInvitation] = []
+    public private(set) var history: [RemoteHistoryEntry] = []
+    public private(set) var isViewingHistory = false
+    private var historyLoadToken: UUID?
+    private var historyLoaded = false
     public private(set) var greeting: String?
     public private(set) var serverIcon: [UInt8] = []
     public private(set) var serverDownloadLimit: UInt32 = 0
@@ -49,6 +53,7 @@ import Observation
     private var receiveTask: Task<Void, Never>?
     private struct PendingRequest {
         let token: UUID
+        var historyLoadToken: UUID?
         let continuation: CheckedContinuation<Message, Error>
         var timeout: Task<Void, Never>?
     }
@@ -92,6 +97,9 @@ import Observation
                             request.timeout?.cancel()
                             do {
                                 try self.checkStatus(message)
+                                if message.type == 181, self.isViewingHistory, request.historyLoadToken == self.historyLoadToken {
+                                    self.history = Array(try RemoteHistoryEntry.decodeList(message.payload).suffix(500)); self.historyLoaded = true
+                                }
                                 if message.type == 203 || message.type == 216 { try self.installChatWindow(message.payload) }
                                 request.continuation.resume(returning: message)
                             }
@@ -113,6 +121,7 @@ import Observation
     }
     public func disconnect() {
         activeTransfer?.close(); activeTransfer = nil; transferFactory = nil; table = nil
+        history = []; isViewingHistory = false; historyLoadToken = nil; historyLoaded = false
         accounts = []; accountClasses = []; sessionLogin = ""
         files = []; filePath = []; transferStatus = nil; newsGroups = []; newsPosts = []; newsPermissions = 0; newsGroupID = nil; newsLoadToken = nil; checkedOperations = [:]
         connection?.close(); connection = nil; receiveTask?.cancel(); receiveTask = nil
@@ -135,7 +144,7 @@ import Observation
         let tx = transaction, token = UUID()
         let response = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                pending[tx] = PendingRequest(token: token, continuation: continuation)
+                pending[tx] = PendingRequest(token: token, historyLoadToken: type == 180 ? historyLoadToken : nil, continuation: continuation)
                 Task {
                     do { try await wire.send(type: type, payload: payload, transaction: tx) }
                     catch { self.failRequest(tx, token: token, error: error) }
@@ -165,6 +174,22 @@ import Observation
     }
     public func setStatus(_ status: UInt8) async throws {
         try await sendChecked(type: 110, payload: [status,0,0,0])
+    }
+    public func startHistory() async throws {
+        guard !isViewingHistory else { return }
+        let token = UUID(); historyLoadToken = token; historyLoaded = false
+        isViewingHistory = true; history = []
+        do {
+            let reply = try await request(type: 180)
+            guard reply.type == 181 else { throw KDXError.invalid("Unexpected server-history reply.") }
+        } catch {
+            if historyLoadToken == token { isViewingHistory = false; historyLoadToken = nil; historyLoaded = false }
+            throw error
+        }
+    }
+    public func stopHistory() async throws {
+        isViewingHistory = false; historyLoadToken = nil; historyLoaded = false
+        if isConnected { try await sendChecked(type: 182, payload: []) }
     }
     public func serverSettings() async throws -> RemoteServerSettings {
         let reply = try await request(type: 170)
@@ -481,6 +506,11 @@ import Observation
                 if let operation = checkedOperations[message.transaction] { operation.error = error }
                 else { lastError = error.localizedDescription }
             }
+        case 183:
+            guard isViewingHistory, historyLoaded else { break }
+            let (entry, used) = try RemoteHistoryEntry.decode(b)
+            guard used == b.count else { throw KDXError.invalid("Unexpected history update.") }
+            history.append(entry); if history.count > 500 { history.removeFirst(history.count-500) }
         case 106: serverIcon = b
         case 107:
             try b.require(4); greeting = b.text(4..<b.count)
