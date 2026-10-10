@@ -80,3 +80,35 @@ struct ChatTopicEditor: View {
         }.padding(24).frame(width: 460)
     }
 }
+
+struct ChatInviteView: View {
+    let client: KDXClient
+    @State private var selected: Set<UInt32> = []
+    @State private var sending = false
+    @State private var error: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Invite to \(client.chatWindow?.name ?? "Chat")").font(.title2.bold())
+            Text("Select up to 20 connected users.").foregroundStyle(.secondary)
+            List(client.users.filter { $0.id != client.currentUser?.id }) { user in
+                Toggle(user.nickname, isOn: Binding(get: { selected.contains(user.id) }, set: { value in
+                    if value { selected.insert(user.id) } else { selected.remove(user.id) }
+                }))
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+            HStack {
+                Button("Cancel") { dismiss() }
+                Spacer()
+                Button(sending ? "Sending…" : "Send Invitations") {
+                    sending = true
+                    Task {
+                        defer { sending = false }
+                        do { try await client.inviteToChat(users: selected.sorted()); dismiss() }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }.buttonStyle(.borderedProminent).disabled(selected.isEmpty || selected.count > 20)
+            }
+        }.padding(24).frame(width: 420, height: 400).disabled(sending)
+    }
+}

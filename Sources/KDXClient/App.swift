@@ -36,6 +36,7 @@ struct ClientView: View {
     @State private var recipient: UInt32?
     @State private var editingChat: ChatRecord?
     @State private var deletingChat: ChatRoom?
+    @State private var inviting = false
     @State private var editingTopic = false
     var body: some View {
         NavigationSplitView {
@@ -61,9 +62,24 @@ struct ClientView: View {
                         }.buttonStyle(.plain).padding(8)
                             .background(client.joinedRoom == room.id ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
                             .contextMenu {
-                                Button("Edit Room…") { perform { editingChat = try await client.chatRecord(id: room.id) } }
+                                if room.flags & 1 == 0 { Button("Edit Room…") { perform { editingChat = try await client.chatRecord(id: room.id) } } }
                                 if room.id != 1 { Button("Delete Room…", role: .destructive) { deletingChat = room } }
                             }
+                    }
+                    if !client.chatInvitations.isEmpty {
+                        Text("CHAT INVITATIONS").font(.caption).foregroundStyle(.secondary)
+                        ScrollView {
+                        ForEach(client.chatInvitations) { invitation in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(invitation.name).font(.headline)
+                                Text("From \(client.users.first { $0.id == invitation.inviterID }?.nickname ?? "User \(invitation.inviterID)")").font(.caption)
+                                HStack {
+                                    Button("Accept") { section = "Chat"; perform { try await client.acceptInvitation(invitation) } }
+                                    Button("Decline") { client.dismissInvitation(invitation) }
+                                }
+                            }
+                        }
+                        }.frame(maxHeight: 180)
                     }
                     Spacer()
                     Button("My Profile…", systemImage: "person.crop.circle") { editingProfile = true }
@@ -102,6 +118,7 @@ struct ClientView: View {
         .sheet(item: $inspectingUser) { UserInformationView(client: client, user: $0) }
         .onChange(of: client.currentUser?.nickname) { _, value in if let value, client.isConnected { nickname = value } }
         .onChange(of: client.currentUser?.info) { _, value in if let value, client.isConnected { profileInfo = value } }
+        .sheet(isPresented: $inviting) { ChatInviteView(client: client) }
         .sheet(item: $editingChat) { ChatEditorView(client: client, room: $0) }
         .sheet(isPresented: $editingTopic) { ChatTopicEditor(client: client, topic: client.chatTopics[client.joinedRoom ?? 0]?.text ?? "") }
         .confirmationDialog("Delete Chat Room", isPresented: Binding(get: { deletingChat != nil }, set: { if !$0 { deletingChat = nil } }), titleVisibility: .visible) {
@@ -227,6 +244,8 @@ struct ClientView: View {
                     }
                     Spacer()
                     Menu("Room", systemImage: "ellipsis.circle") {
+                        Button("Create Private Chat") { perform { try await client.createPrivateChat() } }
+                        Button("Invite Users…") { inviting = true }.disabled(client.joinedRoom == nil)
                         Button("Set Topic…") { editingTopic = true }.disabled(client.joinedRoom == nil)
                         Button("Leave Room") { perform { try await client.leaveRoom() } }.disabled(client.joinedRoom == nil)
                     }

@@ -69,6 +69,8 @@ public struct ServerLog: Identifiable, Sendable {
     private var configurationURL: URL?
     private var news = NewsStore()
     private var newsLoaded = false
+    private var privateChats: [UInt32: (room: ChatRecord, owner: UInt32)] = [:]
+    private var nextInvitation: UInt32 = 1
     private var nextUser: UInt32 = 1
     private var chatTopics: [UInt32: ChatTopic] = [:]
     struct Peer {
@@ -127,7 +129,7 @@ public struct ServerLog: Identifiable, Sendable {
         startWaiter?.resume(throwing: KDXError.disconnected); startWaiter = nil
         let old = listener; listener = nil; old?.cancel()
         for peer in peers.values { peer.wire.close() }; peers.removeAll()
-        users = []; chatTopics = [:]; newsLoaded = false; port = nil; isRunning = false; record("Server stopped")
+        users = []; chatTopics = [:]; privateChats = [:]; nextInvitation = 1; newsLoaded = false; port = nil; isRunning = false; record("Server stopped")
     }
     public func disconnectUser(_ id: UInt32) { peers.values.first { $0.user?.id == id }?.wire.close() }
     private func record(_ text: String) { log.append(ServerLog(text: text)); if log.count > 500 { log.removeFirst() } }
@@ -194,6 +196,7 @@ public struct ServerLog: Identifiable, Sendable {
         if let user = peers.removeValue(forKey: id)?.user {
             for peer in peers.values where peer.parent == id { peer.wire.close() }
             users.removeAll { $0.id == user.id }
+            removeEmptyPrivateChats()
             await broadcast(type: 104, payload: user.id.beBytes + [7,0,0,0])
             record("\(user.nickname) disconnected")
         }
@@ -258,7 +261,7 @@ public struct ServerLog: Identifiable, Sendable {
         case 400:
             let files = try SharedFiles(path: configuration.sharedFolder).list(RemotePath(wire: b).names)
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files), transaction: tx, reply: true)
-        case 201...220:
+        case 200...220:
             try await handleChat(message, id: id, wire: wire)
         case 300:
             try requirePrivilege(32, peer: peers[id])
@@ -427,7 +430,7 @@ extension KDXServer {
             let effective = privileges(for: peers[peerID]), classID = peers[peerID]?.account?.classID ?? 2
             if !effective.contains(30) { peers[peerID]?.joined = [] }
             else { peers[peerID]?.joined = Set(oldRooms.filter { room in
-                configuration.chats.first { $0.id == room }.map { ChatRecord.permits($0.joinClasses, classID: classID) } ?? false
+                (try? chatRecord(room)).map { ChatRecord.permits($0.joinClasses, classID: classID) } ?? false
             }) }
             if let peer = peers[peerID], let userID = peer.user?.id {
                 for roomID in oldRooms.subtracting(peer.joined) { departures.append((roomID, userID, peer.wire)) }
@@ -440,6 +443,7 @@ extension KDXServer {
                 if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = user }
             }
         }
+        removeEmptyPrivateChats()
         for (roomID, userID, departingWire) in departures { await notifyDeparture(roomID: roomID, userID: userID, wire: departingWire) }
         for peerID in changed {
             if let peer = peers[peerID], let user = peer.user {
@@ -458,13 +462,33 @@ extension KDXServer {
         guard ChatRecord.permits(mask, classID: peer?.account?.classID ?? 2) else { throw KDXError.remote(0x10014) }
     }
     private func chatRecord(_ roomID: UInt32) throws -> ChatRecord {
-        guard let room = configuration.chats.first(where: { $0.id == roomID }) else { throw KDXError.remote(0x1000c) }
+        guard let room = privateChats[roomID]?.room ?? configuration.chats.first(where: { $0.id == roomID }) else { throw KDXError.remote(0x1000c) }
         return room
     }
     private func handleChat(_ message: Message, id: UUID, wire: WireConnection) async throws {
         let b = message.payload, tx = message.transaction
         guard let peer = peers[id], let user = peer.user else { throw KDXError.disconnected }
         switch message.type {
+        case 200:
+            try requirePrivilege(34, peer: peer)
+            guard b.isEmpty, privateChats.values.filter({ $0.owner == user.id }).count < 10 else { throw KDXError.remote(0x1000a) }
+            var room = ChatRecord(name: "Private \(privateChats.values.filter { $0.owner == user.id }.count + 1)")
+            repeat { room.id = UInt32.random(in: 4...UInt32.max) } while (try? chatRecord(room.id)) != nil
+            room.key = UInt32.random(in: 1...UInt32.max)
+            privateChats[room.id] = (room, user.id); peers[id]?.joined.insert(room.id)
+            let window = ChatWindow(id: room.id, key: room.key, members: [user.id], strings: ["", "", room.name, "", ""])
+            try await wire.send(type: 216, payload: window.encode(), transaction: tx, reply: true)
+        case 211:
+            let invite = try ChatInviteRequest.decode(b), room = try chatRecord(invite.roomID)
+            guard peer.joined.contains(room.id) else { throw KDXError.remote(0x10014) }
+            var invitation = ChatInvitation(roomID: room.id, key: room.key, inviterID: user.id, name: room.name)
+            invitation.opaque.put(nextInvitation, at: 0); invitation.opaque.put(UInt16(1), at: 4)
+            nextInvitation = nextInvitation == UInt32.max ? 1 : nextInvitation + 1
+            let payload = try invitation.encode()
+            let targets = Set(invite.users)
+            for target in peers.values.filter({ $0.user.map { targets.contains($0.id) } ?? false }).map(\.wire) {
+                do { try await target.send(type: 212, payload: payload) } catch { target.close() }
+            }
         case 214:
             let rooms = configuration.chats.map { room in
                 ChatRoom(id: room.id, key: room.key, name: room.name, description: room.description,
@@ -474,7 +498,7 @@ extension KDXServer {
         case 202:
             try b.require(8); let room = try chatRecord(b.u32(0))
             try requireChatAccess(30, mask: room.joinClasses, peer: peer)
-            guard room.flags & 1 == 0 || room.key == b.u32(4) else { throw KDXError.remote(0x10014) }
+            guard (privateChats[room.id] == nil && room.flags & 1 == 0) || room.key == b.u32(4) else { throw KDXError.remote(0x10014) }
             let wasMember = peer.joined.contains(room.id)
             peers[id]?.joined.insert(room.id)
             let members = peers.values.filter { $0.joined.contains(room.id) }.compactMap { $0.user?.id }.sorted()
@@ -487,6 +511,7 @@ extension KDXServer {
             if peers[id]?.joined.remove(room.id) != nil {
                 await broadcast(type: 206, payload: room.id.beBytes + user.id.beBytes + [1,0,0,0], excluding: id, room: room.id)
             }
+            removeEmptyPrivateChats()
         case 207:
             try b.require(13); let room = try chatRecord(b.u32(0))
             try requireChatAccess(31, mask: room.sendClasses, peer: peer)
@@ -508,12 +533,12 @@ extension KDXServer {
         case 217, 220:
             try requirePrivilege(37, peer: peer)
             var room = try ChatRecord.decode(b)
-            // Voice and private-room management need additional protocol support.
+            // Named-room administration does not create voice or private rooms.
             guard room.flags == 0, room.key == 0 else { throw KDXError.remote(0x10004) }
             guard !room.name.isEmpty else { throw KDXError.remote(0x1000a) }
             var candidate = configuration
             if message.type == 217 {
-                repeat { room.id = UInt32.random(in: 4...UInt32.max) } while candidate.chats.contains(where: { $0.id == room.id })
+                repeat { room.id = UInt32.random(in: 4...UInt32.max) } while (try? chatRecord(room.id)) != nil
                 candidate.chats.append(room)
             } else {
                 guard let index = candidate.chats.firstIndex(where: { $0.id == room.id }) else { throw KDXError.remote(0x1000c) }
@@ -528,7 +553,8 @@ extension KDXServer {
             try requirePrivilege(37, peer: peer); try b.require(4)
             let room = try chatRecord(b.u32(0))
             guard room.id != 1 else { throw KDXError.remote(0x10014) }
-            var candidate = configuration; candidate.chats.removeAll { $0.id == room.id }; try commitConfiguration(candidate)
+            if privateChats[room.id] != nil { privateChats.removeValue(forKey: room.id) }
+            else { var candidate = configuration; candidate.chats.removeAll { $0.id == room.id }; try commitConfiguration(candidate) }
             let members = peers.values.filter { $0.joined.contains(room.id) }.map(\.wire)
             for peerID in peers.keys { peers[peerID]?.joined.remove(room.id) }
             chatTopics.removeValue(forKey: room.id)
@@ -536,6 +562,11 @@ extension KDXServer {
             try await wire.send(type: 1, payload: [UInt32(0), message.type].flatMap(\.beBytes), transaction: tx, reply: true)
             record("Deleted chat \(room.name)")
         default: throw KDXError.remote(0x10004)
+        }
+    }
+    private func removeEmptyPrivateChats() {
+        for roomID in Array(privateChats.keys) where !peers.values.contains(where: { $0.joined.contains(roomID) }) {
+            privateChats.removeValue(forKey: roomID); chatTopics.removeValue(forKey: roomID)
         }
     }
     // Apply all membership changes before any await, so concurrent messages see the new policy.

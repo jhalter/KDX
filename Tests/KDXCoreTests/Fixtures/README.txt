@@ -33,3 +33,9 @@ at the same reference commit, under the same MIT license. It captures original
 class editing and newsgroup creation, info, editing, deletion, and lists, with public lab password
 'lab-only-pw!1'. Reproduce from the reference checkout with:
 python3 -I scripts/extract-capture.py /path/to/kdx/captures/linux-accounts-news.pcapng 51382 Tests/KDXCoreTests/Fixtures/linux-accounts-news-51382
+
+linux-chat-admin-37484/37478.*.bin was extracted from
+captures/linux-chat-admin.pcapng at the same reference commit and MIT license.
+Port 37484 creates the private room and sends invitations; 37478 receives them.
+Both use the public lab password. Reproduce each with scripts/extract-capture.py,
+the source pcapng, its client port, and the matching fixture output prefix.
