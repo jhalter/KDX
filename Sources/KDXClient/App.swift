@@ -24,6 +24,8 @@ struct ClientView: View {
     @State private var tableReady = false
     @State private var section = "Chat"
     @State private var newsGroup: UInt32 = 1
+    @State private var editingNewsGroup: NewsGroupInfo?
+    @State private var deletingNewsGroup: NewsGroup?
     @State private var composing = false
     @State private var newsSubject = ""
     @State private var newsBody = ""
@@ -117,7 +119,12 @@ struct ClientView: View {
             HStack {
                 Picker("Newsgroup", selection: $newsGroup) { ForEach(client.newsGroups) { group in Text(group.name).tag(group.id) } }
                 Spacer()
-                Button("Refresh", systemImage: "arrow.clockwise") { perform { try await client.loadNews(group: newsGroup) } }
+                Button("Refresh", systemImage: "arrow.clockwise") { perform { try await refreshNews() } }
+                Menu("Groups", systemImage: "folder.badge.gearshape") {
+                    Button("Create Newsgroup…") { editingNewsGroup = NewsGroupInfo(name: "") }
+                    Button("Edit Newsgroup…") { perform { editingNewsGroup = try await client.newsGroup(id: newsGroup) } }.disabled(client.newsGroups.isEmpty)
+                    Button("Delete Newsgroup…", role: .destructive) { deletingNewsGroup = client.newsGroups.first { $0.id == newsGroup } }.disabled(client.newsGroups.isEmpty)
+                }
                 Button("Post…", systemImage: "square.and.pencil") { composing = true }.disabled(client.newsPermissions & 1 == 0)
             }.padding()
             List(client.newsPosts) { post in
@@ -125,18 +132,24 @@ struct ClientView: View {
                     HStack {
                         Text(post.subject).font(.headline)
                         Spacer()
-                        if client.newsPermissions & 2 != 0 || (!login.isEmpty && post.login == login) {
+                        if client.newsPermissions & 2 != 0 || (!client.sessionLogin.isEmpty && post.login == client.sessionLogin && post.id == client.newsPosts.first?.id) {
                             Button("Delete", role: .destructive) { perform { try await client.deleteNews(post) } }
                         }
                     }
                     Text("\(post.author) · \(post.date.formatted())").font(.caption).foregroundStyle(.secondary)
                     Text(post.body).textSelection(.enabled)
                 }.padding(.vertical, 10)
-            }.overlay { if client.newsPosts.isEmpty { ContentUnavailableView("No news yet", systemImage: "newspaper", description: Text("Posts from this server will appear here.")) } }
+            }.overlay { if client.newsPosts.isEmpty { ContentUnavailableView("No news yet", systemImage: "newspaper", description: Text(client.newsPermissions & 4 == 0 && client.newsPermissions & 1 != 0 ? "You can post to this group, but cannot read its posts." : "Posts from this server will appear here.")) } }
         }
-        .task { perform { try await client.loadNewsGroups(); if let first = client.newsGroups.first { newsGroup = first.id; try await client.loadNews(group: first.id) } } }
-        .onChange(of: newsGroup) { _, value in perform { try await client.loadNews(group: value) } }
-        .onChange(of: client.newsRevision) { _, _ in perform { try await client.loadNews(group: newsGroup) } }
+        .task { perform { try await refreshNews() } }
+        .onChange(of: newsGroup) { _, value in if client.newsGroups.contains(where: { $0.id == value }) { perform { try await client.loadNews(group: value) } } }
+        .onChange(of: client.newsGroups) { _, groups in if !groups.contains(where: { $0.id == newsGroup }), let first = groups.first { newsGroup = first.id } }
+        .onChange(of: client.newsRevision) { _, _ in perform { try await refreshNews() } }
+        .sheet(item: $editingNewsGroup) { NewsGroupEditorView(client: client, group: $0) }
+        .confirmationDialog("Delete Newsgroup", isPresented: Binding(get: { deletingNewsGroup != nil }, set: { if !$0 { deletingNewsGroup = nil } }), titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { if let group = deletingNewsGroup { perform { try await client.deleteNewsGroup(id: group.id); try await refreshNews() } }; deletingNewsGroup = nil }
+            Button("Cancel", role: .cancel) { deletingNewsGroup = nil }
+        } message: { Text("Delete “\(deletingNewsGroup?.name ?? "")” and all its posts?") }
         .sheet(isPresented: $composing) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Post News").font(.title2.bold())
@@ -156,6 +169,11 @@ struct ClientView: View {
                 }
             }.padding(24).frame(width: 520)
         }
+    }
+    private func refreshNews() async throws {
+        try await client.loadNewsGroups()
+        if !client.newsGroups.contains(where: { $0.id == newsGroup }), let first = client.newsGroups.first { newsGroup = first.id }
+        if client.newsGroups.contains(where: { $0.id == newsGroup }) { try await client.loadNews(group: newsGroup) }
     }
     private var fileBrowser: some View {
         VStack(spacing: 0) {

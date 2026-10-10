@@ -125,7 +125,7 @@ struct SessionCipher: Sendable {
     let cipher: Twofish
     init(key: AccountKey) { cipher = Twofish(key: key.bytes) }
     func seal(_ message: Message) throws -> [UInt8] {
-        guard message.transaction != 0, message.type != 0, message.payload.count <= 0x100000 else { throw KDXError.invalid("Message exceeds protocol limits.") }
+        guard message.transaction != 0, message.type != 0, message.payload.count <= (message.type == 608 ? 0x4000000 : 0x100000) else { throw KDXError.invalid("Message exceeds protocol limits.") }
         var out = sealHeader(transaction: message.transaction, type: message.type, reply: message.isReply, length: UInt32(message.payload.count))
         let fill = (message.transaction &* 0x41c64e6d &+ 0x3039).leBytes
         var payload = message.payload

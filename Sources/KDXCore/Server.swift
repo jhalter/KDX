@@ -68,6 +68,7 @@ public struct ServerLog: Identifiable, Sendable {
     public private(set) var configuration = ServerConfiguration()
     private var configurationURL: URL?
     private var news = NewsStore()
+    private var newsLoaded = false
     private var nextUser: UInt32 = 1
     private var chatTopics: [UInt32: ChatTopic] = [:]
     struct Peer {
@@ -85,7 +86,7 @@ public struct ServerLog: Identifiable, Sendable {
         guard listener == nil else { throw KDXError.invalid("Server is already running.") }
         try configuration.validate()
         self.configuration = configuration; self.configurationURL = configurationURL; lastError = nil
-        news = try NewsStore(url: configuration.newsFile.isEmpty ? nil : URL(fileURLWithPath: configuration.newsFile))
+        news = try NewsStore(url: configuration.newsFile.isEmpty ? nil : URL(fileURLWithPath: configuration.newsFile)); newsLoaded = true
         let listener = try NWListener(using: .tcp, on: configuration.port == 0 ? .any : NWEndpoint.Port(rawValue: configuration.port)!)
         self.listener = listener
         listener.newConnectionHandler = { [weak self] network in
@@ -126,11 +127,15 @@ public struct ServerLog: Identifiable, Sendable {
         startWaiter?.resume(throwing: KDXError.disconnected); startWaiter = nil
         let old = listener; listener = nil; old?.cancel()
         for peer in peers.values { peer.wire.close() }; peers.removeAll()
-        users = []; chatTopics = [:]; port = nil; isRunning = false; record("Server stopped")
+        users = []; chatTopics = [:]; newsLoaded = false; port = nil; isRunning = false; record("Server stopped")
     }
     public func disconnectUser(_ id: UInt32) { peers.values.first { $0.user?.id == id }?.wire.close() }
     private func record(_ text: String) { log.append(ServerLog(text: text)); if log.count > 500 { log.removeFirst() } }
     func accept(wire: WireConnection, table: ChallengeTable) {
+        if !newsLoaded {
+            do { news = try NewsStore(url: configuration.newsFile.isEmpty ? nil : URL(fileURLWithPath: configuration.newsFile)); newsLoaded = true }
+            catch { lastError = error.localizedDescription; wire.close(); return }
+        }
         let id = UUID()
         peers[id] = Peer(wire: wire)
         Task { await self.serve(id: id, wire: wire, table: table) }
@@ -248,38 +253,8 @@ public struct ServerLog: Identifiable, Sendable {
         case 115:
             let address = Array(wire.endpointDescription.utf8.prefix(255))
             try await wire.send(type: 116, payload: [UInt8(address.count)] + address, transaction: tx, reply: true)
-        case 605:
-            try requirePrivilege(70, peer: peers[id])
-            var group = [UInt8](repeating: 0, count: 24); group.put(UInt32(1), at: 8); group.put(UInt16(news.posts.count), at: 16)
-            let name = Array("General".utf8); group[22] = UInt8(name.count)
-            var payload = UInt32(1).beBytes + group + name; payload.pad(4)
-            try await wire.send(type: 606, payload: payload, transaction: tx, reply: true)
-        case 607:
-            try requirePrivilege(70, peer: peers[id])
-            try b.require(4); guard b.u32(0) == 1 else { throw KDXError.remote(0x1000c) }
-            let access = privileges(for: peers[id])
-            let permissions: UInt32 = 4 | (access.contains(71) ? 1 : 0) | (access.contains(72) ? 2 : 0)
-            var payload = [UInt32(1), permissions, 0, UInt32(news.posts.count)].flatMap(\.beBytes)
-            for post in news.posts { payload += try post.encode() }
-            try await wire.send(type: 608, payload: payload, transaction: tx, reply: true)
-        case 609:
-            try requirePrivilege(70, peer: peers[id])
-            try b.require(8)
-            guard b.u32(0) == 1, let post = news.posts.first(where: { $0.id == b.u32(4) }) else { throw KDXError.remote(0x1000c) }
-            try await wire.send(type: 610, payload: post.encode(), transaction: tx, reply: true)
-        case 611:
-            try requirePrivilege(71, peer: peers[id])
-            let login = peers[id]?.account?.login ?? "guest"
-            try b.require(16); let subjectLength = Int(b[14]), bodyLength = Int(b.u16(12)); try b.require(16+subjectLength+bodyLength)
-            guard b.u32(0) == 1 else { throw KDXError.remote(0x1000c) }
-            let post = try news.add(author: user.nickname, login: login, subject: b.text(16..<16+subjectLength), body: b.text(16+subjectLength..<16+subjectLength+bodyLength))
-            await broadcast(type: 613, payload: [UInt32(1), post.id, UInt32(news.posts.count)].flatMap(\.beBytes))
-        case 612:
-            try requirePrivilege(70, peer: peers[id])
-            let login = peers[id]?.account?.login ?? "guest"
-            try b.require(8); guard b.u32(0) == 1 else { throw KDXError.remote(0x1000c) }
-            try news.delete(id: b.u32(4), login: login, admin: privileges(for: peers[id]).contains(72) || privileges(for: peers[id]).contains(0))
-            await broadcast(type: 614, payload: [UInt32(1), b.u32(4), UInt32(news.posts.count)].flatMap(\.beBytes))
+        case 600...612:
+            try await handleNews(message, id: id, wire: wire)
         case 400:
             let files = try SharedFiles(path: configuration.sharedFolder).list(RemotePath(wire: b).names)
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files), transaction: tx, reply: true)
@@ -559,5 +534,65 @@ extension KDXServer {
         let payload = roomID.beBytes + userID.beBytes + [1,0,0,0]
         await broadcast(type: 206, payload: payload, room: roomID)
         _ = try? await wire.send(type: 206, payload: payload)
+    }
+}
+
+extension KDXServer {
+    private func newsPermissions(_ group: NewsGroupInfo, peer: Peer?) -> UInt32 {
+        let access = privileges(for: peer), classID = peer?.account?.classID ?? 2
+        let read = access.contains(70) && (access.contains(0) || ChatRecord.permits(group.readClasses, classID: classID))
+        let post = access.contains(71) && (access.contains(0) || ChatRecord.permits(group.postClasses, classID: classID))
+        return (read ? 4 : 0) | (post ? 1 : 0) | (access.contains(72) ? 2 : 0)
+    }
+    private func handleNews(_ message: Message, id: UUID, wire: WireConnection) async throws {
+        let b = message.payload, tx = message.transaction
+        guard let peer = peers[id], let user = peer.user else { throw KDXError.disconnected }
+        switch message.type {
+        case 600, 604:
+            try requirePrivilege(73, peer: peer)
+            _ = try news.saveGroup(NewsGroupInfo.decode(b), creating: message.type == 600)
+            try await wire.send(type: 1, payload: [UInt32(0), message.type].flatMap(\.beBytes), transaction: tx, reply: true)
+        case 601:
+            try requirePrivilege(73, peer: peer); try b.require(4)
+            try news.deleteGroup(b.u32(0))
+            try await wire.send(type: 1, payload: [UInt32(0), message.type].flatMap(\.beBytes), transaction: tx, reply: true)
+        case 602:
+            try requirePrivilege(73, peer: peer); try b.require(4)
+            try await wire.send(type: 603, payload: news.group(b.u32(0)).encode(), transaction: tx, reply: true)
+        case 605:
+            try requirePrivilege(70, peer: peer)
+            let groups = try news.groups.map { value in
+                let info = try news.group(value.id)
+                return NewsGroup(id: info.id, name: info.name, count: Int(info.messageCount), description: info.description, time: info.time)
+            }
+            try await wire.send(type: 606, payload: NewsGroup.encodeList(groups), transaction: tx, reply: true)
+        case 607:
+            try b.require(4); let group = try news.group(b.u32(0)), permissions = newsPermissions(group, peer: peer)
+            let posts = permissions & 4 == 0 ? [] : news.posts.filter { $0.groupID == group.id }
+            var payload = [group.id, permissions, 0, UInt32(posts.count)].flatMap(\.beBytes)
+            for post in posts { payload += try post.encode() }
+            try await wire.send(type: 608, payload: payload, transaction: tx, reply: true)
+        case 609:
+            try b.require(8); let group = try news.group(b.u32(0))
+            guard newsPermissions(group, peer: peer) & 4 != 0 else { throw KDXError.remote(0x10014) }
+            guard let post = news.posts.first(where: { $0.groupID == group.id && $0.id == b.u32(4) }) else { throw KDXError.remote(0x1000c) }
+            try await wire.send(type: 610, payload: post.encode(), transaction: tx, reply: true)
+        case 611:
+            try b.require(16); let group = try news.group(b.u32(0))
+            guard newsPermissions(group, peer: peer) & 1 != 0 else { throw KDXError.remote(0x10014) }
+            let subjectLength = Int(b[14]), bodyLength = Int(b.u16(12)); try b.require(16+subjectLength+bodyLength)
+            let post = try news.add(groupID: group.id, author: user.nickname, login: peer.account?.login ?? "guest", subject: b.text(16..<16+subjectLength), body: b.text(16+subjectLength..<16+subjectLength+bodyLength))
+            let payload = [group.id, post.id, UInt32(try news.group(group.id).messageCount)].flatMap(\.beBytes)
+            let readers = peers.values.filter { $0.user != nil && newsPermissions(group, peer: $0) & 4 != 0 }.map(\.wire)
+            for reader in readers { do { try await reader.send(type: 613, payload: payload) } catch { reader.close() } }
+        case 612:
+            try b.require(8)
+            guard let group = try? news.group(b.u32(0)), news.posts.contains(where: { $0.groupID == group.id && $0.id == b.u32(4) }) else { return }
+            let access = privileges(for: peer)
+            guard access.contains(0) || ChatRecord.permits(group.readClasses, classID: peer.account?.classID ?? 2) else { throw KDXError.remote(0x10014) }
+            try news.delete(groupID: group.id, id: b.u32(4), login: peer.account?.login ?? "guest", admin: access.contains(72))
+            await broadcast(type: 614, payload: [group.id, b.u32(4), UInt32(try news.group(group.id).messageCount)].flatMap(\.beBytes))
+        default: throw KDXError.remote(0x10004)
+        }
     }
 }

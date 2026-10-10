@@ -22,6 +22,8 @@ import Observation
     public private(set) var newsPosts: [NewsPost] = []
     public private(set) var newsPermissions: UInt32 = 0
     public private(set) var newsRevision = 0
+    public private(set) var newsGroupID: UInt32?
+    private var newsLoadToken: UUID?
     private final class CheckedOperation {
         var error: Error?
         var confirmed = false
@@ -77,7 +79,7 @@ import Observation
             receiveTask = Task { [weak self] in
                 do {
                     while !Task.isCancelled {
-                        let message = try await wire.receive()
+                        let message = try await wire.receive(newsLimit: 0x4000000)
                         guard let self, self.connection === wire else { return }
                         if message.isReply, let request = self.pending.removeValue(forKey: message.transaction) {
                             request.timeout?.cancel()
@@ -105,7 +107,7 @@ import Observation
     public func disconnect() {
         activeTransfer?.close(); activeTransfer = nil; transferFactory = nil; table = nil
         accounts = []; accountClasses = []; sessionLogin = ""
-        files = []; filePath = []; transferStatus = nil; newsGroups = []; newsPosts = []; checkedOperations = [:]
+        files = []; filePath = []; transferStatus = nil; newsGroups = []; newsPosts = []; newsPermissions = 0; newsGroupID = nil; newsLoadToken = nil; checkedOperations = [:]
         connection?.close(); connection = nil; receiveTask?.cancel(); receiveTask = nil
         for request in pending.values { request.timeout?.cancel(); request.continuation.resume(throwing: KDXError.disconnected) }; pending.removeAll()
         isConnected = false; isConnecting = false; state = "Disconnected"
@@ -263,11 +265,39 @@ import Observation
         let response = try await request(type: 550, payload: AccountKey(password: password).bytes)
         guard response.type == 551, response.payload.isEmpty else { throw KDXError.invalid("Password change was not acknowledged.") }
     }
-    public func loadNewsGroups() async throws { newsGroups = try NewsGroup.decodeList(await request(type: 605).payload) }
+    public func loadNewsGroups() async throws {
+        let response = try await request(type: 605)
+        guard response.type == 606 else { throw KDXError.invalid("Unexpected newsgroup list.") }
+        newsGroups = try NewsGroup.decodeList(response.payload)
+        if let newsGroupID, !newsGroups.contains(where: { $0.id == newsGroupID }) { self.newsGroupID = nil; newsPosts = []; newsPermissions = 0; newsLoadToken = nil }
+    }
+    public func newsGroup(id: UInt32) async throws -> NewsGroupInfo {
+        let response = try await request(type: 602, payload: id.beBytes)
+        guard response.type == 603 else { throw KDXError.invalid("Unexpected newsgroup information.") }
+        return try NewsGroupInfo.decode(response.payload)
+    }
+    public func saveNewsGroup(_ group: NewsGroupInfo, creating: Bool) async throws {
+        try group.validate()
+        let type: UInt32 = creating ? 600 : 604
+        try checkMutation(await request(type: type, payload: group.encode()), type: type)
+        try await loadNewsGroups()
+        if newsGroupID == group.id { try await loadNews(group: group.id) }
+    }
+    public func deleteNewsGroup(id: UInt32) async throws {
+        try checkMutation(await request(type: 601, payload: id.beBytes), type: 601)
+        try await loadNewsGroups()
+    }
     public func loadNews(group: UInt32 = 1) async throws {
+        let token = UUID(); newsLoadToken = token; newsGroupID = group
+        newsPosts = []; newsPermissions = 0
         let response = try await request(type: 607, payload: group.beBytes)
-        newsPosts = try NewsPost.decodeList(response.payload).sorted { $0.date > $1.date }
-        newsPermissions = response.payload.u32(4)
+        guard newsLoadToken == token else { return }
+        guard response.type == 608 else { throw KDXError.invalid("Unexpected news reply.") }
+        try response.payload.require(16)
+        guard response.payload.u32(0) == group else { throw KDXError.invalid("Unexpected newsgroup in reply.") }
+        let posts = try NewsPost.decodeList(response.payload)
+        guard posts.allSatisfy({ $0.groupID == group }) else { throw KDXError.invalid("News reply contains a different group.") }
+        newsPosts = posts.sorted { $0.id > $1.id }; newsPermissions = response.payload.u32(4)
     }
     public func postNews(group: UInt32 = 1, subject: String, body: String) async throws {
         let subjectBytes = Array(subject.utf8), bodyBytes = Array(body.utf8)
@@ -276,11 +306,11 @@ import Observation
         payload.put(group, at: 0); payload.put(UInt16(bodyBytes.count), at: 12); payload[14] = UInt8(subjectBytes.count)
         payload += subjectBytes + bodyBytes; payload.pad(4)
         try await sendChecked(type: 611, payload: payload)
-        try await loadNews(group: group)
+        if newsGroupID == nil || newsGroupID == group { try await loadNews(group: group) }
     }
     public func deleteNews(_ post: NewsPost) async throws {
         try await sendChecked(type: 612, payload: post.groupID.beBytes + post.id.beBytes)
-        try await loadNews(group: post.groupID)
+        if newsGroupID == post.groupID { try await loadNews(group: post.groupID) }
     }
     private func sendChecked(type: UInt32, payload: [UInt8]) async throws {
         guard let connection else { throw KDXError.disconnected }

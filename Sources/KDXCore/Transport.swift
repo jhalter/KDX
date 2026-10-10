@@ -130,9 +130,10 @@ import Foundation
         try await write(cipher.seal(Message(transaction: id, type: type, isReply: reply, payload: payload)))
         return id
     }
-    func receive(limit: Int = 0x100000) async throws -> Message {
+    func receive(limit: Int = 0x100000, newsLimit: Int? = nil) async throws -> Message {
         guard let cipher else { throw KDXError.authentication }
-        let header = try cipher.header(await read(16), limit: limit)
+        let header = try cipher.header(await read(16), limit: max(limit, newsLimit ?? limit))
+        guard header.length <= (header.type == 608 ? newsLimit ?? limit : limit) else { throw KDXError.invalid("Message exceeds its protocol limit.") }
         return try await cipher.open(header, payload: read(header.paddedLength, timeout: .seconds(30)))
     }
     func sendFile(type: UInt32, length: UInt32, source: FileHandle?, resourceOffset: UInt64? = nil, transaction: UInt32? = nil, reply: Bool = false, progress: (UInt64) -> Void = { _ in }) async throws {
