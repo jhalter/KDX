@@ -52,8 +52,8 @@ struct ServerView: View {
                     Section("Accounts") {
                         ForEach(configuration.accounts) { account in
                             HStack {
-                                Label(account.login, systemImage: account.isAdmin ? "person.badge.key" : "person")
-                                Spacer(); Text(account.isAdmin ? "Administrator" : "Member").foregroundStyle(.secondary)
+                                Label(account.login, systemImage: account.effective(in: configuration.accountClasses).contains(0) ? "person.badge.key" : "person")
+                                Spacer(); Text(account.effective(in: configuration.accountClasses).contains(0) ? "Administrator" : "Member").foregroundStyle(.secondary)
                                 Button("Remove", role: .destructive) { configuration.accounts.removeAll { $0.id == account.id } }
                             }
                         }
@@ -90,6 +90,12 @@ struct ServerView: View {
                 if FileManager.default.fileExists(atPath: url.path) { configuration = try ServerConfiguration.load(from: url); port = String(configuration.port) }
             } catch { self.error = error.localizedDescription }
         }
+        .onChange(of: server.isRunning) { wasRunning, running in
+            if wasRunning && !running { configuration = server.configuration; port = String(configuration.port) }
+        }
+        .onChange(of: server.configuration) { _, _ in
+            if server.isRunning { configuration = server.configuration }
+        }
         .onChange(of: server.lastError) { _, value in if let value { error = value } }
         .alert("KDX Server", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") { error = nil } } message: { Text(error ?? "") }
     }
@@ -114,7 +120,7 @@ struct ServerView: View {
             do {
                 configuration.newsFile = try KDXStorage.directory().appendingPathComponent("news.json").path
                 try configuration.save(to: KDXStorage.configurationURL())
-                try await server.start(configuration: configuration, table: KDXStorage.loadTable())
+                try await server.start(configuration: configuration, table: KDXStorage.loadTable(), configurationURL: KDXStorage.configurationURL())
             } catch { self.error = error.localizedDescription }
         }
     }

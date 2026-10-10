@@ -19,7 +19,7 @@ The build script creates ad-hoc-signed `dist/KDX Client.app` and `dist/KDX Serve
 2. Use **Import KDX Binary or Table…** in either app. The importer checks the table's SHA-256 before storing it. Both apps use the same local table. The copyrighted table is not distributed here; importing a ZIP directly is not supported yet.
 3. In KDX Server, choose a name, port, shared folder, and accounts. Enable guest access if desired, then start the server. Account settings are editable while stopped.
 4. In KDX Client, enter the host (use `127.0.0.1` for the same Mac), port, account/password, and nickname. An empty account/password requests guest access.
-5. Use Chat, Files, and News. Right-click a user for private messaging. Guests can chat, read news, and download; named accounts can also upload and post news.
+5. Use Chat, Files, News, and Accounts. Right-click a user for private messaging. The default guest class can chat, read news, and download; the default member class can also upload and post news. Account overrides can allow or deny individual privileges. Administrators can manage accounts remotely, and members can change their own passwords.
 
 Settings, account keys, news, and the imported table reside in `~/Library/Application Support/macOS-KDX/`. Client passwords are not persisted. Server account keys are password-equivalent credentials stored in an owner-readable settings file. KDX's historical SHA-1/Twofish protocol is preserved for compatibility; it does not provide modern authenticated transport security.
 
@@ -29,16 +29,18 @@ Downloads and uploads never replace an existing destination. Pick a new destinat
 
 - Separate SwiftUI client and server apps, connection state, error reporting, persisted connection fields and server settings.
 - KDX hello/proof authentication, challenge-table extraction/verification, account-key derivation, Twofish-256, header scrambling, and encrypted message framing.
+- Remote account list/create/edit/rename/delete, class info/list, per-account privilege overrides, and password changes. Changes are persisted before acknowledgment and propagated to logged-in sessions; account info exposes only a password-present flag. Existing settings migrate automatically.
+- Connection, handshake, payload, and transfer I/O deadlines; cancellable I/O; bounded pending requests; stale request/session cleanup.
 - Multi-client server, identity/user list updates, public chat, private messages, disconnect controls, ping and request/reply correlation.
-- File browsing and encrypted streaming upload/download on authenticated transfer connections. Transfer sessions use the session key and must originate from the parent connection's IP. Uploads require a named account.
+- File browsing and encrypted streaming upload/download on authenticated transfer connections. Transfer sessions use the session key and must originate from the parent connection's IP. Uploads require the upload privilege.
 - News listing, reading, posting, ownership/admin deletion, change notifications, and server-side persistence.
 - Import of an existing KDX binary or raw challenge table; protocol-compatible credentials, not a custom login protocol.
 
 ## Verification
 
-`ProtocolTests` includes a Twofish known-answer vector and independent captured traffic from the reference. It reproduces both handshakes, authentication proofs, and every encrypted message in the first-connect fixture byte for byte. No challenge table is needed for these fixture tests.
+`ProtocolTests` includes a Twofish known-answer vector and independent captured traffic from the reference. It reproduces both handshakes, authentication proofs, and every encrypted message in the first-connect fixture byte for byte. Account tests additionally compare account, class, and account-list payloads against independently captured reference traffic. No challenge table is needed for these fixture tests.
 
-The headless integration suite exercises actual client/server session code over a fragmented in-memory byte transport. It checks multi-client chat and private messages, authentication rejection, news ownership/persistence, and upload/download integrity across multiple cipher chunks. Filesystem tests cover traversal, symlinks, overwrite refusal, and temporary-file cleanup. A synthetic table is available only to internal test code, never to the apps' import path.
+The headless integration suite exercises actual client/server session code over a fragmented in-memory byte transport. It checks multi-client chat and private messages, authentication rejection, news ownership/persistence, and upload/download integrity across multiple cipher chunks. Filesystem tests cover traversal, symlinks, overwrite refusal, and temporary-file cleanup. Account tests cover persistence rollback on write failure, privilege escalation rejection, old-password rejection, connected-session updates, and protected account deletion. Lifecycle tests cover stalled I/O, cancellation, timed-out requests, and replacing an in-progress login. A synthetic table is available only to internal test code, never to the apps' import path.
 
 Real TCP remains a separate test gate:
 

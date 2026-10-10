@@ -11,12 +11,20 @@ import Observation
     public private(set) var chat: [ChatLine] = []
     public private(set) var joinedRoom: UInt32?
     public private(set) var lastError: String?
+    public private(set) var accounts: [AccountListEntry] = []
+    public private(set) var accountClasses: [AccountClass] = []
+    public private(set) var sessionLogin = ""
     public private(set) var newsGroups: [NewsGroup] = []
     public private(set) var newsPosts: [NewsPost] = []
     public private(set) var newsPermissions: UInt32 = 0
     public private(set) var newsRevision = 0
-    private var checkedTransactions: Set<UInt32> = []
-    private var operationErrors: [UInt32: Error] = [:]
+    private final class CheckedOperation {
+        var error: Error?
+        var confirmed = false
+        let deletedLogin: String?
+        init(deletedLogin: String?) { self.deletedLogin = deletedLogin }
+    }
+    private var checkedOperations: [UInt32: CheckedOperation] = [:]
     public private(set) var files: [RemoteFile] = []
     public private(set) var filePath: [String] = []
     public private(set) var transferProgress: Double = 0
@@ -26,15 +34,23 @@ import Observation
     private var table: ChallengeTable?
     private var connection: WireConnection?
     private var receiveTask: Task<Void, Never>?
-    private var pending: [UInt32: CheckedContinuation<Message, Error>] = [:]
+    private struct PendingRequest {
+        let token: UUID
+        let continuation: CheckedContinuation<Message, Error>
+        var timeout: Task<Void, Never>?
+    }
+    private var pending: [UInt32: PendingRequest] = [:]
+    var requestTimeout: Duration = .seconds(15)
     public init() {}
     public func connect(host: String, port: UInt16, login: String, password: String, nickname: String, table: ChallengeTable) async throws {
-        try await connect(wire: WireConnection(host: host, port: port), login: login, password: password, nickname: nickname, table: table)
+        let wire = try WireConnection(host: host, port: port)
+        try await connect(wire: wire, login: login, password: password, nickname: nickname, table: table)
+        guard connection === wire else { throw KDXError.disconnected }
         transferFactory = { try WireConnection(host: host, port: port) }
     }
     func connect(wire: WireConnection, login: String, password: String, nickname: String, table: ChallengeTable) async throws {
         disconnect()
-        self.table = table
+        self.table = table; sessionLogin = login
         connection = wire; isConnecting = true; state = "Connecting…"; lastError = nil
         do {
             try await wire.start()
@@ -59,9 +75,10 @@ import Observation
                     while !Task.isCancelled {
                         let message = try await wire.receive()
                         guard let self, self.connection === wire else { return }
-                        if message.isReply, let continuation = self.pending.removeValue(forKey: message.transaction) {
-                            do { try self.checkStatus(message); continuation.resume(returning: message) }
-                            catch { continuation.resume(throwing: error) }
+                        if message.isReply, let request = self.pending.removeValue(forKey: message.transaction) {
+                            request.timeout?.cancel()
+                            do { try self.checkStatus(message); request.continuation.resume(returning: message) }
+                            catch { request.continuation.resume(throwing: error) }
                         } else { try self.handle(message) }
                     }
                 } catch {
@@ -69,8 +86,9 @@ import Observation
                     self.disconnect(); self.lastError = error.localizedDescription
                 }
             }
-            try await refreshRooms()
-            try await join(room: 1)
+            do { try await refreshRooms(); try await join(room: 1) }
+            catch KDXError.remote(let code) where code == 0x10014 { rooms = []; joinedRoom = nil }
+            guard connection === wire else { throw KDXError.disconnected }
         } catch {
             if connection === wire { disconnect(); lastError = error.localizedDescription }
             throw error
@@ -78,9 +96,10 @@ import Observation
     }
     public func disconnect() {
         activeTransfer?.close(); activeTransfer = nil; transferFactory = nil; table = nil
-        files = []; filePath = []; transferStatus = nil; newsGroups = []; newsPosts = []; checkedTransactions = []; operationErrors = [:]
+        accounts = []; accountClasses = []; sessionLogin = ""
+        files = []; filePath = []; transferStatus = nil; newsGroups = []; newsPosts = []; checkedOperations = [:]
         connection?.close(); connection = nil; receiveTask?.cancel(); receiveTask = nil
-        for continuation in pending.values { continuation.resume(throwing: KDXError.disconnected) }; pending.removeAll()
+        for request in pending.values { request.timeout?.cancel(); request.continuation.resume(throwing: KDXError.disconnected) }; pending.removeAll()
         isConnected = false; isConnecting = false; state = "Disconnected"
         serverInfo = nil; users = []; rooms = []; joinedRoom = nil; chat = []
     }
@@ -91,23 +110,34 @@ import Observation
         if b.u32(0) != 0 { throw KDXError.remote(b.u32(0)) }
     }
     public func request(type: UInt32, payload: [UInt8] = []) async throws -> Message {
+        try Task.checkCancellation()
         guard let wire = connection, isConnected else { throw KDXError.disconnected }
-        let transaction = wire.allocateTransaction()
-        return try await withTaskCancellationHandler {
+        guard pending.count < 256 else { throw KDXError.invalid("Too many pending requests.") }
+        var transaction = wire.allocateTransaction()
+        while pending[transaction] != nil { transaction = wire.allocateTransaction() }
+        let tx = transaction, token = UUID()
+        let response = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                pending[transaction] = continuation
+                pending[tx] = PendingRequest(token: token, continuation: continuation)
                 Task {
-                    do { try await wire.send(type: type, payload: payload, transaction: transaction) }
-                    catch { self.pending.removeValue(forKey: transaction)?.resume(throwing: error) }
+                    do { try await wire.send(type: type, payload: payload, transaction: tx) }
+                    catch { self.failRequest(tx, token: token, error: error) }
                 }
-                Task {
-                    try? await Task.sleep(for: .seconds(15))
-                    self.pending.removeValue(forKey: transaction)?.resume(throwing: KDXError.invalid("The server did not reply in time."))
+                pending[tx]?.timeout = Task { [weak self, requestTimeout] in
+                    do { try await Task.sleep(for: requestTimeout) } catch { return }
+                    self?.failRequest(tx, token: token, error: KDXError.invalid("The server did not reply in time."))
                 }
             }
         } onCancel: {
-            Task { @MainActor in self.pending.removeValue(forKey: transaction)?.resume(throwing: CancellationError()) }
+            Task { @MainActor in self.failRequest(tx, token: token, error: CancellationError()) }
         }
+        try Task.checkCancellation()
+        guard connection === wire else { throw KDXError.disconnected }
+        return response
+    }
+    private func failRequest(_ transaction: UInt32, token: UUID, error: Error) {
+        guard pending[transaction]?.token == token, let request = pending.removeValue(forKey: transaction) else { return }
+        request.timeout?.cancel(); request.continuation.resume(throwing: error)
     }
     public func refreshRooms() async throws { rooms = try ChatRoom.list(await request(type: 214).payload) }
     public func join(room: UInt32, key: UInt32 = 0) async throws {
@@ -130,6 +160,42 @@ import Observation
         try await connection.send(type: 300, payload: id.beBytes + [UInt8](repeating: 0, count: 12) + bytes)
         chat.append(ChatLine(userID: id, sender: "To \(users.first { $0.id == id }?.nickname ?? String(id))", text: text, isPrivate: true))
     }
+    public func loadAccounts() async throws {
+        let response = try await request(type: 512)
+        guard response.type == 513 else { throw KDXError.invalid("Unexpected account-list reply.") }
+        accounts = try AccountListEntry.decodeList(response.payload)
+    }
+    public func loadAccountClasses() async throws {
+        let response = try await request(type: 505)
+        guard response.type == 506 else { throw KDXError.invalid("Unexpected account-class reply.") }
+        accountClasses = try AccountClass.decodeList(response.payload)
+    }
+    public func account(login: String) async throws -> RemoteAccount {
+        let response = try await request(type: 509, payload: Array(login.utf8))
+        guard response.type == 510 else { throw KDXError.invalid("Unexpected account reply.") }
+        return try RemoteAccount.decode(response.payload)
+    }
+    public func createAccount(_ account: RemoteAccount, password: String) async throws {
+        try ServerAccount.validateLogin(account.login)
+        var record = account; record.key = AccountKey(password: password).bytes
+        try await accountMutation(type: 507, record: record)
+    }
+    public func updateAccount(_ account: RemoteAccount, originalLogin: String, newPassword: String? = nil) async throws {
+        try ServerAccount.validateLogin(account.login)
+        var record = account; record.editor = originalLogin
+        record.key = newPassword.map { AccountKey(password: $0).bytes } ?? [UInt8](repeating: 0, count: 32)
+        try await accountMutation(type: 511, record: record)
+        if sessionLogin == originalLogin { sessionLogin = account.login }
+    }
+    private func accountMutation(type: UInt32, record: RemoteAccount) async throws {
+        let response = try await request(type: type, payload: record.encode())
+        guard response.type == 1, response.payload.count == 8, response.payload.u32(0) == 0, response.payload.u32(4) == type else { throw KDXError.invalid("Unexpected account-update reply.") }
+    }
+    public func deleteAccount(login: String) async throws { try await sendChecked(type: 508, payload: Array(login.utf8)) }
+    public func changePassword(to password: String) async throws {
+        let response = try await request(type: 550, payload: AccountKey(password: password).bytes)
+        guard response.type == 551, response.payload.isEmpty else { throw KDXError.invalid("Password change was not acknowledged.") }
+    }
     public func loadNewsGroups() async throws { newsGroups = try NewsGroup.decodeList(await request(type: 605).payload) }
     public func loadNews(group: UInt32 = 1) async throws {
         let response = try await request(type: 607, payload: group.beBytes)
@@ -151,12 +217,20 @@ import Observation
     }
     private func sendChecked(type: UInt32, payload: [UInt8]) async throws {
         guard let connection else { throw KDXError.disconnected }
-        let tx = connection.allocateTransaction(); checkedTransactions.insert(tx)
-        defer { checkedTransactions.remove(tx); operationErrors.removeValue(forKey: tx) }
-        try await connection.send(type: type, payload: payload, transaction: tx)
-        // KDX mutations often have no success reply. This round trip is an ordering barrier.
-        _ = try await request(type: 115)
-        if let error = operationErrors[tx] { throw error }
+        let tx = connection.allocateTransaction()
+        let operation = CheckedOperation(deletedLogin: type == 508 ? String(bytes: payload, encoding: .utf8) : nil)
+        checkedOperations[tx] = operation
+        defer { if checkedOperations[tx] === operation { checkedOperations.removeValue(forKey: tx) } }
+        do {
+            try await connection.send(type: type, payload: payload, transaction: tx)
+            // KDX mutations often have no success reply. This round trip is an ordering barrier.
+            _ = try await request(type: 115)
+        } catch {
+            // Deleting one's own account closes the session after the explicit 515 notification.
+            if operation.confirmed && operation.error == nil { return }
+            throw error
+        }
+        if let error = operation.error { throw error }
     }
     func setTransferFactory(_ factory: @escaping () throws -> WireConnection) { transferFactory = factory }
     public func listFiles(path: [String] = []) async throws {
@@ -168,16 +242,17 @@ import Observation
     private func attach() async throws -> WireConnection {
         guard let info = serverInfo, let table, let factory = transferFactory else { throw KDXError.disconnected }
         guard activeTransfer == nil else { throw KDXError.invalid("A transfer is already running.") }
-        let wire = try factory(); activeTransfer = wire
+        let wire = try factory(); activeTransfer = wire; wire.ioTimeout = .seconds(30)
         do {
             try await wire.start()
             try await wire.authenticateClient(name: [0] + info.userID.beBytes, key: AccountKey(bytes: info.sessionKey), table: table)
+            guard activeTransfer === wire, isConnected else { throw KDXError.disconnected }
             return wire
-        } catch { wire.close(); activeTransfer = nil; throw error }
+        } catch { wire.close(); if activeTransfer === wire { activeTransfer = nil }; throw error }
     }
     public func download(_ file: RemoteFile, to destination: URL) async throws {
         let wire = try await attach()
-        defer { wire.close(); activeTransfer = nil; transferStatus = nil }
+        defer { wire.close(); if activeTransfer === wire { activeTransfer = nil; transferStatus = nil } }
         transferStatus = "Downloading \(file.name)"; transferProgress = 0
         let parent = destination.deletingLastPathComponent()
         let store = try SharedFiles(path: parent.path)
@@ -189,14 +264,15 @@ import Observation
         try info.payload.require(76)
         let size = info.payload.u64(0), resourceSize = info.payload.u64(8)
         guard size <= UInt32.max, resourceSize == 0 else { throw KDXError.invalid("This transfer requires unsupported resource-fork handling or exceeds 4 GiB.") }
-        let count = try await wire.receiveFile(type: 414, sink: staging.handle, maximum: size, transaction: tx) { value in self.transferProgress = size == 0 ? 1 : Double(value)/Double(size) }
+        let count = try await wire.receiveFile(type: 414, sink: staging.handle, maximum: size, transaction: tx) { value in if self.activeTransfer === wire { self.transferProgress = size == 0 ? 1 : Double(value)/Double(size) } }
         guard count == size else { throw KDXError.invalid("Incomplete download.") }
         _ = try await wire.receiveFile(type: 414, sink: nil, maximum: 0)
+        guard activeTransfer === wire else { throw KDXError.disconnected }
         try staging.commit(); transferProgress = 1
     }
     public func upload(from source: URL) async throws {
         let wire = try await attach()
-        defer { wire.close(); activeTransfer = nil; transferStatus = nil }
+        defer { wire.close(); if activeTransfer === wire { activeTransfer = nil; transferStatus = nil } }
         transferStatus = "Uploading \(source.lastPathComponent)"; transferProgress = 0
         let store = try SharedFiles(path: source.deletingLastPathComponent().path)
         let (handle, size) = try store.openFile([source.lastPathComponent]); defer { try? handle.close() }
@@ -212,10 +288,11 @@ import Observation
         try reply.payload.require(24); let offset = reply.payload.u64(0)
         guard offset <= size else { throw KDXError.invalid("Invalid upload resume offset.") }
         try handle.seek(toOffset: offset)
-        try await wire.sendFile(type: 417, length: UInt32(size-offset), source: handle) { value in self.transferProgress = size == 0 ? 1 : Double(offset+value)/Double(size) }
+        try await wire.sendFile(type: 417, length: UInt32(size-offset), source: handle) { value in if self.activeTransfer === wire { self.transferProgress = size == 0 ? 1 : Double(offset+value)/Double(size) } }
         try await wire.sendFile(type: 417, length: 0, source: nil)
         let complete = try await wire.receive(); try checkStatus(complete)
         guard complete.type == 418 else { throw KDXError.invalid("Upload was not acknowledged.") }
+        guard activeTransfer === wire else { throw KDXError.disconnected }
         transferProgress = 1
         try await listFiles(path: filePath)
     }
@@ -224,9 +301,12 @@ import Observation
         switch message.type {
         case 1:
             do { try checkStatus(message) } catch {
-                if checkedTransactions.contains(message.transaction) { operationErrors[message.transaction] = error }
+                if let operation = checkedOperations[message.transaction] { operation.error = error }
                 else { lastError = error.localizedDescription }
             }
+        case 515:
+            let login = b.text(0..<b.count); accounts.removeAll { $0.login == login }
+            for operation in checkedOperations.values where operation.deletedLogin == login { operation.confirmed = true }
         case 613, 614: newsRevision += 1
         case 101: users = try KDXUser.list(b)
         case 102, 103:

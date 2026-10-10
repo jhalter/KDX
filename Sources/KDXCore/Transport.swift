@@ -37,11 +37,7 @@ import Foundation
                 }
             }
             network.start(queue: .main)
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(15))
-                guard let self, self.readyWaiter != nil else { return }
-                self.failReady(KDXError.invalid("Connection timed out.")); self.close()
-            }
+
         }
     }
     private func failReady(_ error: Error) { readyWaiter?.resume(throwing: error); readyWaiter = nil }
@@ -71,15 +67,43 @@ import Foundation
     private let transport: any ByteTransport
     var cipher: SessionCipher?
     private var nextTransaction = UInt32.random(in: 1...UInt32.max)
+    private var closed = false
+    var ioTimeout: Duration?
+    var handshakeTimeout: Duration = .seconds(15)
     var endpointDescription: String { transport.endpointDescription }
     var peerHost: String { transport.peerHost }
     init(transport: any ByteTransport) { self.transport = transport }
     convenience init(network: NWConnection) { self.init(transport: TCPTransport(network: network)) }
     convenience init(host: String, port: UInt16) throws { self.init(transport: try TCPTransport(host: host, port: port)) }
-    func start() async throws { try await transport.start() }
-    func close() { transport.close() }
-    func read(_ count: Int) async throws -> [UInt8] { try await transport.read(count) }
-    func write(_ bytes: [UInt8]) async throws { try await transport.write(bytes) }
+    func start() async throws { try await performIO(timeout: handshakeTimeout) { try await self.transport.start() } }
+    func close() { guard !closed else { return }; closed = true; transport.close() }
+    func read(_ count: Int, timeout: Duration? = nil) async throws -> [UInt8] { try await performIO(timeout: timeout ?? ioTimeout) { try await self.transport.read(count) } }
+    func write(_ bytes: [UInt8]) async throws { try await performIO(timeout: ioTimeout ?? .seconds(30)) { try await self.transport.write(bytes) } }
+    private func performIO<T: Sendable>(timeout: Duration?, _ operation: @MainActor () async throws -> T) async throws -> T {
+        try Task.checkCancellation()
+        guard !closed else { throw KDXError.disconnected }
+        var timedOut = false
+        let timer = timeout.map { duration in
+            Task { [weak self] in
+                do { try await Task.sleep(for: duration) } catch { return }
+                timedOut = true; self?.close()
+            }
+        }
+        defer { timer?.cancel() }
+        return try await withTaskCancellationHandler {
+            do {
+                let value = try await operation()
+                try Task.checkCancellation()
+                if timedOut { throw KDXError.invalid("The connection stopped responding.") }
+                guard !closed else { throw KDXError.disconnected }
+                return value
+            } catch {
+                if timedOut { throw KDXError.invalid("The connection stopped responding.") }
+                if Task.isCancelled { throw CancellationError() }
+                throw error
+            }
+        } onCancel: { Task { @MainActor [weak self] in self?.close() } }
+    }
     func receiveHello() async throws -> Hello {
         var bytes = try await read(36)
         let remaining = try Hello.length(bytes) - 36
@@ -87,7 +111,7 @@ import Foundation
         return try Hello(wire: bytes)
     }
     func authenticateClient(name: [UInt8], key: AccountKey, table: ChallengeTable) async throws {
-        let timeout = Task { [weak self] in try? await Task.sleep(for: .seconds(15)); if !Task.isCancelled { self?.close() } }
+        let timeout = Task { [weak self] in try? await Task.sleep(for: self?.handshakeTimeout ?? .seconds(15)); if !Task.isCancelled { self?.close() } }
         defer { timeout.cancel() }
         let hello = Hello(server: false, name: name)
         try await write(hello.encode())
@@ -109,7 +133,7 @@ import Foundation
     func receive(limit: Int = 0x100000) async throws -> Message {
         guard let cipher else { throw KDXError.authentication }
         let header = try cipher.header(await read(16), limit: limit)
-        return try await cipher.open(header, payload: read(header.paddedLength))
+        return try await cipher.open(header, payload: read(header.paddedLength, timeout: .seconds(30)))
     }
     func sendFile(type: UInt32, length: UInt32, source: FileHandle?, transaction: UInt32? = nil, reply: Bool = false, progress: (UInt64) -> Void = { _ in }) async throws {
         guard let cipher else { throw KDXError.authentication }

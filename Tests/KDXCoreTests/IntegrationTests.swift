@@ -23,7 +23,7 @@ final class IntegrationTests: XCTestCase {
         try await eventually { alice.users.count == 1 && server.users.count == 1 }
         let pong = try await alice.request(type: 108)
         XCTAssertEqual(pong.type, 109)
-        do { _ = try await alice.request(type: 9999); XCTFail("Unsupported request accepted") } catch KDXError.remote { }
+        do { _ = try await alice.request(type: 9999); XCTFail("Unsupported request accepted") } catch KDXError.remote(let code) { XCTAssertEqual(code, 0x10004) }
     }
     @MainActor func testIncorrectPasswordAndUnknownAccountAreRejected() async throws {
         let table = ChallengeTable(testBytes: [UInt8](repeating: 7, count: 1739))

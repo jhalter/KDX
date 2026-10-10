@@ -15,6 +15,8 @@ import Foundation
     func start() async throws { if closed { throw KDXError.disconnected } }
     func read(_ count: Int) async throws -> [UInt8] {
         if count == 0 { return [] }
+        // Preserve bytes delivered before a remote close, like a TCP FIN.
+        if buffer.count >= count { let result = Array(buffer.prefix(count)); buffer.removeFirst(count); return result }
         guard !closed else { throw KDXError.disconnected }
         precondition(pending == nil)
         return try await withCheckedThrowingContinuation { pending = (count, $0); drain() }

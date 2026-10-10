@@ -2,24 +2,27 @@ import Foundation
 import Observation
 @preconcurrency import Network
 
-public struct ServerAccount: Codable, Identifiable, Sendable {
-    public var id: String { login }
-    public let login: String
-    public var isAdmin: Bool
-    var key: [UInt8]
-    public init(login: String, password: String, isAdmin: Bool = false) {
-        self.login = login; self.isAdmin = isAdmin; key = AccountKey(password: password).bytes
-    }
-}
-public struct ServerConfiguration: Codable, Sendable {
+public struct ServerConfiguration: Codable, Equatable, Sendable {
     public var name = "My KDX Server"
     public var description = "Welcome to KDX"
     public var port: UInt16 = 10700
     public var allowGuests = true
     public var accounts: [ServerAccount] = []
+    public var accountClasses: [AccountClass] = AccountClass.defaults
     public var sharedFolder = ""
     public var newsFile = ""
     public init() {}
+    private enum CodingKeys: String, CodingKey { case name, description, port, allowGuests, accounts, accountClasses, sharedFolder, newsFile }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name); description = try c.decode(String.self, forKey: .description)
+        port = try c.decode(UInt16.self, forKey: .port); allowGuests = try c.decode(Bool.self, forKey: .allowGuests)
+        accounts = try c.decode([ServerAccount].self, forKey: .accounts)
+        accountClasses = try c.decodeIfPresent([AccountClass].self, forKey: .accountClasses) ?? AccountClass.defaults
+        sharedFolder = try c.decodeIfPresent(String.self, forKey: .sharedFolder) ?? ""
+        newsFile = try c.decodeIfPresent(String.self, forKey: .newsFile) ?? ""
+        try validate()
+    }
     public func save(to url: URL) throws {
         try validate()
         let data = try JSONEncoder().encode(self)
@@ -30,8 +33,14 @@ public struct ServerConfiguration: Codable, Sendable {
     func validate() throws {
         _ = try shortText(name); _ = try shortText(description)
         guard !name.isEmpty, Set(accounts.map(\.login)).count == accounts.count else { throw KDXError.invalid("Server name is required and account logins must be unique.") }
+        guard accounts.count <= 4096, accountClasses.count <= 32,
+              Set(accountClasses.map(\.id)).count == accountClasses.count,
+              accountClasses.contains(where: { $0.id == 2 }) else { throw KDXError.invalid("Invalid account classes or account limit.") }
+        for entry in accountClasses { _ = try entry.encode(info: true) }
         for account in accounts {
-            guard !account.login.isEmpty, account.login.utf8.count <= 31, !account.login.utf8.contains(0), account.key.count == 32 else { throw KDXError.invalid("Invalid account. Logins must contain 1–31 UTF-8 bytes.") }
+            try ServerAccount.validateLogin(account.login)
+            guard account.key.count == 32, account.unknown77.count == 3, accountClasses.contains(where: { $0.id == account.classID }) else { throw KDXError.invalid("Invalid account key or class.") }
+            _ = try RemoteAccount.info(account).encode()
         }
     }
 }
@@ -49,10 +58,11 @@ public struct ServerLog: Identifiable, Sendable {
     private var listener: NWListener?
     private var startWaiter: CheckedContinuation<Void, Error>?
     private var peers: [UUID: Peer] = [:]
-    private var configuration = ServerConfiguration()
+    public private(set) var configuration = ServerConfiguration()
+    private var configurationURL: URL?
     private var news = NewsStore()
     private var nextUser: UInt32 = 1
-    private struct Peer {
+    struct Peer {
         let wire: WireConnection
         var user: KDXUser?
         var account: ServerAccount?
@@ -60,11 +70,11 @@ public struct ServerLog: Identifiable, Sendable {
         var joined = false
         var parent: UUID?
     }
-    public init(configuration: ServerConfiguration = ServerConfiguration()) { self.configuration = configuration }
-    public func start(configuration: ServerConfiguration, table: ChallengeTable) async throws {
+    public init(configuration: ServerConfiguration = ServerConfiguration(), configurationURL: URL? = nil) { self.configuration = configuration; self.configurationURL = configurationURL }
+    public func start(configuration: ServerConfiguration, table: ChallengeTable, configurationURL: URL? = nil) async throws {
         guard listener == nil else { throw KDXError.invalid("Server is already running.") }
         try configuration.validate()
-        self.configuration = configuration; lastError = nil
+        self.configuration = configuration; self.configurationURL = configurationURL; lastError = nil
         news = try NewsStore(url: configuration.newsFile.isEmpty ? nil : URL(fileURLWithPath: configuration.newsFile))
         let listener = try NWListener(using: .tcp, on: configuration.port == 0 ? .any : NWEndpoint.Port(rawValue: configuration.port)!)
         self.listener = listener
@@ -93,6 +103,13 @@ public struct ServerLog: Identifiable, Sendable {
                 }
             }
             listener.start(queue: .main)
+            Task { [weak self, weak listener] in
+                try? await Task.sleep(for: .seconds(15))
+                guard let self, let listener, self.listener === listener, self.startWaiter != nil else { return }
+                let error = KDXError.invalid("The server listener did not start in time.")
+                self.startWaiter?.resume(throwing: error); self.startWaiter = nil
+                self.lastError = error.localizedDescription; self.stop()
+            }
         }
     }
     public func stop() {
@@ -111,6 +128,7 @@ public struct ServerLog: Identifiable, Sendable {
     private func serve(id: UUID, wire: WireConnection, table: ChallengeTable) async {
         do {
             try await wire.start()
+            wire.ioTimeout = .seconds(15)
             let timeout = Task { try? await Task.sleep(for: .seconds(15)); if !Task.isCancelled { wire.close() } }
             do {
                 let client = try await wire.receiveHello()
@@ -125,14 +143,22 @@ public struct ServerLog: Identifiable, Sendable {
                           let parent = peers.first(where: { $0.value.user?.id == client.name.u32(1) && $0.value.parent == nil }),
                           parent.value.wire.peerHost == wire.peerHost else { throw KDXError.authentication }
                     key = try AccountKey(bytes: parent.value.sessionKey)
-                    peers[id]?.parent = parent.key
+                    peers[id]?.parent = parent.key; wire.ioTimeout = .seconds(30)
                 } else if let account { key = try AccountKey(bytes: account.key) }
                 else if configuration.allowGuests && (name.isEmpty || name == "guest") { key = AccountKey(password: "") }
                 else { throw KDXError.authentication }
                 try Proof(wire: await wire.read(44)).verify(key: key, nonce: hello.nonce, response: table.response(hello.challenge))
                 try await wire.write(Proof(key: key, nonce: client.nonce, response: table.response(client.challenge)).encode())
                 wire.cipher = SessionCipher(key: key)
-                peers[id]?.account = account
+                // Recheck after the network await: an administrator may have changed/deleted this account.
+                if let account {
+                    guard let current = configuration.accounts.first(where: { $0.login == account.login }), current.key == key.bytes else { throw KDXError.authentication }
+                    var updated = current; updated.lastLogin = ServerAccount.now
+                    var candidate = configuration
+                    candidate.accounts[candidate.accounts.firstIndex(where: { $0.login == current.login })!] = updated
+                    try commitConfiguration(candidate)
+                    peers[id]?.account = updated
+                }
                 peers[id]?.sessionKey = (0..<32).map { _ in UInt8.random(in: .min ... .max) }
             } catch { timeout.cancel(); throw error }
             timeout.cancel()
@@ -167,13 +193,15 @@ public struct ServerLog: Identifiable, Sendable {
         if message.type == 100 {
             var (user, _) = try KDXUser.decode(b)
             guard !user.nickname.isEmpty else { throw KDXError.remote(0x1000a) }
+            wire.ioTimeout = nil
             let old = peers[id]?.user
             user.id = old?.id ?? nextUser
             if old == nil { nextUser = nextUser &+ 1; if nextUser == 0 { nextUser = 1 } }
-            user.isAdmin = peers[id]?.account?.isAdmin ?? false
+            user.isAdmin = privileges(for: peers[id]).contains(0)
+            if !privileges(for: peers[id]).contains(60) { user.nickname = peers[id]?.account?.name ?? "Guest" }
             peers[id]?.user = user; users.removeAll { $0.id == user.id }; users.append(user)
             if old == nil {
-                let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: user.isAdmin, sessionKey: peers[id]?.sessionKey ?? [])
+                let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: privileges(for: peers[id]).contains(61), sessionKey: peers[id]?.sessionKey ?? [])
                 try await wire.send(type: 105, payload: info.encode())
                 try await wire.send(type: 101, payload: KDXUser.encodeList(users))
                 record("\(user.nickname) connected")
@@ -182,41 +210,52 @@ public struct ServerLog: Identifiable, Sendable {
             return
         }
         guard let user = peers[id]?.user else { throw KDXError.remote(0x10014) }
+        if [UInt32(502), 505, 507, 508, 509, 511, 512, 550].contains(message.type) {
+            try await handleAccounts(message, id: id, wire: wire)
+            return
+        }
         switch message.type {
         case 108: try await wire.send(type: 109, transaction: tx, reply: true)
         case 115:
             let address = Array(wire.endpointDescription.utf8.prefix(255))
             try await wire.send(type: 116, payload: [UInt8(address.count)] + address, transaction: tx, reply: true)
         case 605:
+            try requirePrivilege(70, peer: peers[id])
             var group = [UInt8](repeating: 0, count: 24); group.put(UInt32(1), at: 8); group.put(UInt16(news.posts.count), at: 16)
             let name = Array("General".utf8); group[22] = UInt8(name.count)
             var payload = UInt32(1).beBytes + group + name; payload.pad(4)
             try await wire.send(type: 606, payload: payload, transaction: tx, reply: true)
         case 607:
+            try requirePrivilege(70, peer: peers[id])
             try b.require(4); guard b.u32(0) == 1 else { throw KDXError.remote(0x1000c) }
-            let permissions: UInt32 = 4 | (peers[id]?.account != nil ? 1 : 0) | (user.isAdmin ? 2 : 0)
+            let access = privileges(for: peers[id])
+            let permissions: UInt32 = 4 | (access.contains(71) ? 1 : 0) | (access.contains(72) ? 2 : 0)
             var payload = [UInt32(1), permissions, 0, UInt32(news.posts.count)].flatMap(\.beBytes)
             for post in news.posts { payload += try post.encode() }
             try await wire.send(type: 608, payload: payload, transaction: tx, reply: true)
         case 609:
+            try requirePrivilege(70, peer: peers[id])
             try b.require(8)
             guard b.u32(0) == 1, let post = news.posts.first(where: { $0.id == b.u32(4) }) else { throw KDXError.remote(0x1000c) }
             try await wire.send(type: 610, payload: post.encode(), transaction: tx, reply: true)
         case 611:
-            guard let account = peers[id]?.account else { throw KDXError.remote(0x10014) }
+            try requirePrivilege(71, peer: peers[id])
+            let login = peers[id]?.account?.login ?? "guest"
             try b.require(16); let subjectLength = Int(b[14]), bodyLength = Int(b.u16(12)); try b.require(16+subjectLength+bodyLength)
             guard b.u32(0) == 1 else { throw KDXError.remote(0x1000c) }
-            let post = try news.add(author: user.nickname, login: account.login, subject: b.text(16..<16+subjectLength), body: b.text(16+subjectLength..<16+subjectLength+bodyLength))
+            let post = try news.add(author: user.nickname, login: login, subject: b.text(16..<16+subjectLength), body: b.text(16+subjectLength..<16+subjectLength+bodyLength))
             await broadcast(type: 613, payload: [UInt32(1), post.id, UInt32(news.posts.count)].flatMap(\.beBytes))
         case 612:
-            guard let account = peers[id]?.account else { throw KDXError.remote(0x10014) }
+            try requirePrivilege(70, peer: peers[id])
+            let login = peers[id]?.account?.login ?? "guest"
             try b.require(8); guard b.u32(0) == 1 else { throw KDXError.remote(0x1000c) }
-            try news.delete(id: b.u32(4), login: account.login, admin: account.isAdmin)
+            try news.delete(id: b.u32(4), login: login, admin: privileges(for: peers[id]).contains(72) || privileges(for: peers[id]).contains(0))
             await broadcast(type: 614, payload: [UInt32(1), b.u32(4), UInt32(news.posts.count)].flatMap(\.beBytes))
         case 400:
             let files = try SharedFiles(path: configuration.sharedFolder).list(RemotePath(wire: b).names)
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files), transaction: tx, reply: true)
         case 214:
+            try requirePrivilege(30, peer: peers[id])
             let name = Array("Public Chat".utf8), description = Array("Everyone is welcome".utf8)
             var entry = [UInt8](repeating: 0, count: 20)
             entry.put(UInt32(1), at: 0); entry.put(UInt16(peers.values.filter(\.joined).count), at: 16)
@@ -224,6 +263,7 @@ public struct ServerLog: Identifiable, Sendable {
             var payload = UInt32(1).beBytes + entry + name + description; payload.pad(4)
             try await wire.send(type: 215, payload: payload, transaction: tx, reply: true)
         case 202:
+            try requirePrivilege(30, peer: peers[id])
             try b.require(8); guard b.u32(0) == 1 else { throw KDXError.remote(0x1000c) }
             peers[id]?.joined = true
             let members = peers.values.filter(\.joined).compactMap { $0.user?.id }, name = Array("Public Chat".utf8)
@@ -237,16 +277,18 @@ public struct ServerLog: Identifiable, Sendable {
             peers[id]?.joined = false
             await broadcast(type: 206, payload: UInt32(1).beBytes + user.id.beBytes + [1,0,0,0], excluding: id, joinedOnly: true)
         case 207:
+            try requirePrivilege(31, peer: peers[id])
             try b.require(13)
             guard peers[id]?.joined == true, b.u32(0) == 1 else { throw KDXError.remote(0x10014) }
             guard b.count <= 4108 else { throw KDXError.remote(0x1000a) }
             var text = b; text.put(user.id, at: 4)
             await broadcast(type: 208, payload: text, joinedOnly: true)
         case 300:
+            try requirePrivilege(32, peer: peers[id])
             try b.require(17); guard b.count <= 4112 else { throw KDXError.remote(0x1000a) }
             guard let recipient = peers.values.first(where: { $0.user?.id == b.u32(0) }) else { throw KDXError.remote(0x1000c) }
             var payload = b; payload.put(user.id, at: 0); try await recipient.wire.send(type: 301, payload: payload)
-        default: throw KDXError.remote(0x10006)
+        default: throw KDXError.remote(0x10004)
         }
     }
     private func handleTransfer(_ message: Message, wire: WireConnection, parent: Peer) async throws {
@@ -256,8 +298,9 @@ public struct ServerLog: Identifiable, Sendable {
         case 400:
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files.list(RemotePath(wire: b).names)), transaction: tx, reply: true)
         case 412:
+            try requirePrivilege(10, peer: parent)
             try b.require(24)
-            guard b[23] == 0, b.u64(8) == 0 else { throw KDXError.remote(0x10006) }
+            guard b[23] == 0, b.u64(8) == 0 else { throw KDXError.remote(0x10004) }
             let path = try RemotePath(wire: Array(b.dropFirst(24)))
             let (handle, size) = try files.openFile(path.names)
             defer { try? handle.close() }
@@ -272,10 +315,9 @@ public struct ServerLog: Identifiable, Sendable {
             try await wire.sendFile(type: 414, length: 0, source: nil)
             record("Downloaded \(path.names.joined(separator: "/"))")
         case 415:
-            // Anonymous guests may browse and download, but cannot upload.
-            guard parent.account != nil else { throw KDXError.remote(0x10014) }
+            try requirePrivilege(11, peer: parent)
             try b.require(76)
-            guard b[23] == 0, b.u64(8) == 0, b.u64(0) <= UInt32.max else { throw KDXError.remote(0x10006) }
+            guard b[23] == 0, b.u64(8) == 0, b.u64(0) <= UInt32.max else { throw KDXError.remote(0x10004) }
             let stringsEnd = 76 + (72..<76).reduce(0) { $0 + Int(b[$1]) }
             let pathLength = Int(b.u16(70)); try b.require(stringsEnd + pathLength)
             guard stringsEnd + pathLength == b.count else { throw KDXError.remote(0x1000a) }
@@ -290,11 +332,116 @@ public struct ServerLog: Identifiable, Sendable {
             try upload.commit()
             try await wire.send(type: 418)
             record("Uploaded \(name)")
-        default: throw KDXError.remote(0x10006)
+        default: throw KDXError.remote(0x10004)
         }
     }
     private func broadcast(type: UInt32, payload: [UInt8], excluding: UUID? = nil, joinedOnly: Bool = false) async {
         let recipients = peers.filter { $0.key != excluding && $0.value.user != nil && (!joinedOnly || $0.value.joined) }.map(\.value.wire)
         for wire in recipients { do { try await wire.send(type: type, payload: payload) } catch { wire.close() } }
     }
+}
+
+// Account operations persist a validated candidate before updating live state.
+extension KDXServer {
+    private func privileges(for peer: Peer?) -> AccountPrivileges {
+        peer?.account?.effective(in: configuration.accountClasses)
+            ?? configuration.accountClasses.first { $0.id == 2 }?.privileges ?? AccountPrivileges()
+    }
+    private func requirePrivilege(_ bit: Int, peer: Peer?) throws {
+        guard privileges(for: peer).contains(bit) else { throw KDXError.remote(0x10014) }
+    }
+    private func commitConfiguration(_ candidate: ServerConfiguration) throws {
+        try candidate.validate()
+        if let configurationURL { try candidate.save(to: configurationURL) }
+        configuration = candidate
+    }
+    private func validateGrant(_ account: ServerAccount, requester: Peer?) throws {
+        let granted = account.effective(in: configuration.accountClasses), allowed = privileges(for: requester)
+        if allowed.contains(0) { return }
+        for bit in 0..<128 where granted.contains(bit) && !allowed.contains(bit) {
+            if bit == 3 || bit == 36 || (bit == 23 && allowed.contains(24)) { continue }
+            throw KDXError.remote(0x640005)
+        }
+    }
+    private func handleAccounts(_ message: Message, id: UUID, wire: WireConnection) async throws {
+        let b = message.payload, tx = message.transaction
+        let requester = peers[id]
+        switch message.type {
+        case 505:
+            let permissions = privileges(for: requester)
+            guard [27,37,50,73].contains(where: permissions.contains) else { throw KDXError.remote(0x10014) }
+            try await wire.send(type: 506, payload: AccountClass.encodeList(configuration.accountClasses), transaction: tx, reply: true)
+        case 502:
+            try requirePrivilege(50, peer: requester)
+            guard b.count == 1, let entry = configuration.accountClasses.first(where: { $0.id == b[0] }) else { throw KDXError.remote(0x10002) }
+            try await wire.send(type: 503, payload: entry.encode(info: true), transaction: tx, reply: true)
+        case 512:
+            try requirePrivilege(50, peer: requester)
+            let entries = configuration.accounts.map { account in
+                AccountListEntry(login: account.login, name: account.name, classID: account.classID, created: account.created, lastLogin: account.lastLogin, unknown1b: account.effective(in: configuration.accountClasses).contains(0) ? 1 : 0)
+            }
+            try await wire.send(type: 513, payload: AccountListEntry.encodeList(entries), transaction: tx, reply: true)
+        case 509:
+            try requirePrivilege(50, peer: requester)
+            guard let login = String(bytes: b, encoding: .utf8), let account = configuration.accounts.first(where: { $0.login == login }) else { throw KDXError.remote(0x1000c) }
+            try await wire.send(type: 510, payload: RemoteAccount.info(account).encode(), transaction: tx, reply: true)
+        case 507, 511:
+            let creating = message.type == 507
+            try requirePrivilege(creating ? 51 : 52, peer: requester)
+            let record = try RemoteAccount.decode(b)
+            try ServerAccount.validateLogin(record.login)
+            guard configuration.accountClasses.contains(where: { $0.id == record.classID }) else { throw KDXError.remote(0x10002) }
+            let existing = configuration.accounts.firstIndex { $0.login == record.editor }
+            if !creating && existing == nil { throw KDXError.remote(0x1000c) }
+            if configuration.accounts.contains(where: { $0.login == record.login && (creating || $0.login != record.editor) }) { throw KDXError.remote(0x1000d) }
+            var account = creating ? ServerAccount(login: record.login, password: "") : configuration.accounts[existing!]
+            if account.privilegeMask.contains(54) && account.privileges.contains(54) && !privileges(for: requester).contains(0) { throw KDXError.remote(0x10014) }
+            account.apply(record, editor: requester?.account?.login ?? "guest", creating: creating)
+            try validateGrant(account, requester: requester)
+            var candidate = configuration
+            if creating { candidate.accounts.append(account) } else { candidate.accounts[existing!] = account }
+            try commitConfiguration(candidate)
+            // Keep authenticated sessions' ciphers, but apply the new identity and rights immediately.
+            let changed = creating ? [] : peers.keys.filter { peers[$0]?.account?.login == record.editor }
+            for peerID in changed {
+                peers[peerID]?.account = account
+                let effective = account.effective(in: configuration.accountClasses)
+                if !effective.contains(30) { peers[peerID]?.joined = false }
+                for attached in peers.values where attached.parent == peerID { attached.wire.close() }
+                if var user = peers[peerID]?.user {
+                    user.isAdmin = effective.contains(0)
+                    if !effective.contains(60) { user.nickname = account.name }
+                    peers[peerID]?.user = user
+                    if let index = users.firstIndex(where: { $0.id == user.id }) { users[index] = user }
+                }
+            }
+            try await wire.send(type: 1, payload: [UInt32(0), message.type].flatMap(\.beBytes), transaction: tx, reply: true)
+            for peerID in changed {
+                if let peer = peers[peerID], let user = peer.user {
+                    await broadcast(type: 102, payload: try user.encode())
+                    let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: privileges(for: peer).contains(61), sessionKey: peer.sessionKey)
+                    _ = try? await peer.wire.send(type: 105, payload: info.encode())
+                }
+            }
+            recordLogAccount(creating ? "Created" : "Updated", login: account.login)
+        case 508:
+            try requirePrivilege(52, peer: requester)
+            guard let login = String(bytes: b, encoding: .utf8), let account = configuration.accounts.first(where: { $0.login == login }) else { throw KDXError.remote(0x1000c) }
+            if (account.privilegeMask.contains(0) && account.privileges.contains(0)) || (account.privilegeMask.contains(54) && account.privileges.contains(54) && !privileges(for: requester).contains(0)) { throw KDXError.remote(0x10014) }
+            var candidate = configuration; candidate.accounts.removeAll { $0.login == login }; try commitConfiguration(candidate)
+            try await wire.send(type: 515, payload: b)
+            for peer in peers.values where peer.account?.login == login { peer.wire.close() }
+            recordLogAccount("Deleted", login: login)
+        case 550:
+            try requirePrivilege(53, peer: requester)
+            guard b.count == 32, let login = requester?.account?.login,
+                  let index = configuration.accounts.firstIndex(where: { $0.login == login }) else { throw KDXError.remote(0x10014) }
+            var candidate = configuration; candidate.accounts[index].key = b; candidate.accounts[index].modified = ServerAccount.now
+            try commitConfiguration(candidate)
+            for peerID in peers.keys where peers[peerID]?.account?.login == login { peers[peerID]?.account = candidate.accounts[index] }
+            try await wire.send(type: 551, transaction: tx, reply: true)
+        default: throw KDXError.remote(0x10004)
+        }
+    }
+    private func recordLogAccount(_ action: String, login: String) { record("\(action) account \(login)") }
 }

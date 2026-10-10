@@ -27,6 +27,7 @@ struct ClientView: View {
     @State private var newsSubject = ""
     @State private var newsBody = ""
     @State private var posting = false
+    @State private var changingPassword = false
     @State private var recipient: UInt32?
     var body: some View {
         NavigationSplitView {
@@ -38,7 +39,7 @@ struct ClientView: View {
                     Text(client.serverInfo?.name ?? "Server").font(.headline)
                     Text(client.serverInfo?.description ?? "").font(.callout).foregroundStyle(.secondary)
                     Picker("Section", selection: $section) {
-                        Text("Chat").tag("Chat"); Text("Files").tag("Files"); Text("News").tag("News")
+                        Text("Chat").tag("Chat"); Text("Files").tag("Files"); Text("News").tag("News"); Text("Accounts").tag("Accounts")
                     }.pickerStyle(.segmented)
                     Divider()
                     Text("CHAT ROOMS").font(.caption).foregroundStyle(.secondary)
@@ -49,6 +50,7 @@ struct ClientView: View {
                             .background(client.joinedRoom == room.id ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
                     }
                     Spacer()
+                    Button("Change Password…", systemImage: "key") { changingPassword = true }
                     Button("Disconnect", systemImage: "eject") { client.disconnect() }
                 } else {
                     Form {
@@ -70,7 +72,7 @@ struct ClientView: View {
                 }
             }.padding().navigationSplitViewColumnWidth(min: 260, ideal: 290)
         } detail: {
-            if client.isConnected { if section == "Files" { fileBrowser } else if section == "News" { newsBrowser } else { conversation } }
+            if client.isConnected { if section == "Files" { fileBrowser } else if section == "News" { newsBrowser } else if section == "Accounts" { AccountsView(client: client) } else { conversation } }
             else {
                 ContentUnavailableView("Connect to your community", systemImage: "bubble.left.and.bubble.right", description: Text("Join a KDX server to chat and exchange private messages."))
             }
@@ -78,6 +80,8 @@ struct ClientView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
         }
+        .sheet(isPresented: $changingPassword) { ChangePasswordView(client: client) { password = $0 } }
+        .onChange(of: client.sessionLogin) { _, value in if client.isConnected { login = value } }
         .task { tableReady = (try? KDXStorage.loadTable()) != nil }
         .onChange(of: client.lastError) { _, value in if let value { error = value } }
         .alert("KDX", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") { error = nil } } message: { Text(error ?? "") }
