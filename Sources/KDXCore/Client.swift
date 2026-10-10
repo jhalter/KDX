@@ -32,6 +32,10 @@ import Observation
     public private(set) var broadcasts: [BroadcastMessage] = []
     public private(set) var disconnectNotice: DisconnectNotice?
     private var joining: UUID?
+    private var initializingSession = false
+    private var publicChatRequested = false
+    private var publicChatJoinTask: Task<Void, Never>?
+    private var publicChatJoinToken: UUID?
     public private(set) var lastError: String?
     public private(set) var accounts: [AccountListEntry] = []
     public private(set) var accountClasses: [AccountClass] = []
@@ -68,16 +72,16 @@ import Observation
     private var pending: [UInt32: PendingRequest] = [:]
     var requestTimeout: Duration = .seconds(15)
     public init() {}
-    public func connect(host: String, port: UInt16, login: String, password: String, nickname: String, info: String = "", table: ChallengeTable) async throws {
+    public func connect(host: String, port: UInt16, login: String, password: String, nickname: String, info: String = "", autoJoinPublicChat: Bool = true, table: ChallengeTable) async throws {
         let wire = try WireConnection(host: host, port: port)
-        try await connect(wire: wire, login: login, password: password, nickname: nickname, info: info, table: table)
+        try await connect(wire: wire, login: login, password: password, nickname: nickname, info: info, autoJoinPublicChat: autoJoinPublicChat, table: table)
         guard connection === wire else { throw KDXError.disconnected }
         transferFactory = { try WireConnection(host: host, port: port) }
     }
-    func connect(wire: WireConnection, login: String, password: String, nickname: String, info: String = "", table: ChallengeTable) async throws {
+    func connect(wire: WireConnection, login: String, password: String, nickname: String, info: String = "", autoJoinPublicChat: Bool = true, table: ChallengeTable) async throws {
         disconnect()
         self.table = table; sessionLogin = login; greeting = nil; serverIcon = []; serverDownloadLimit = 0; disconnectNotice = nil; broadcasts = []
-        connection = wire; isConnecting = true; state = "Connecting…"; lastError = nil
+        connection = wire; initializingSession = true; isConnecting = true; state = "Connecting…"; lastError = nil
         do {
             try await wire.start()
             guard connection === wire else { throw KDXError.disconnected }
@@ -119,15 +123,23 @@ import Observation
                     self.disconnect(); self.lastError = error.localizedDescription
                 }
             }
-            do { try await refreshRooms(); try await join(room: 1) }
-            catch KDXError.remote(let code) where code == 0x10014 { rooms = []; joinedRoom = nil }
+            do {
+                try await refreshRooms()
+                let shouldJoin = autoJoinPublicChat || publicChatRequested
+                publicChatRequested = false
+                if shouldJoin { try await join(room: 1) }
+            }
+            catch KDXError.remote(let code) where code == 0x10014 { publicChatRequested = false; joinedRoom = nil }
             guard connection === wire else { throw KDXError.disconnected }
+            initializingSession = false; schedulePublicChatJoin()
         } catch {
             if connection === wire { disconnect(); lastError = error.localizedDescription }
             throw error
         }
     }
     public func disconnect() {
+        publicChatJoinTask?.cancel(); publicChatJoinTask = nil; publicChatJoinToken = nil
+        publicChatRequested = false; initializingSession = false
         activeTransfer?.close(); activeTransfer = nil; transferFactory = nil; table = nil
         connectionMonitorToken = nil
         history = []; isViewingHistory = false; historyLoadToken = nil; historyLoaded = false
@@ -259,9 +271,27 @@ import Observation
         guard joining == nil else { throw KDXError.invalid("A room is already being opened.") }
         if joinedRooms[room] != nil { joinedRoom = room; unreadRooms.removeValue(forKey: room); return }
         let token = UUID(); joining = token
-        defer { if joining == token { joining = nil } }
+        defer { if joining == token { joining = nil; schedulePublicChatJoin() } }
         let response = try await request(type: 202, payload: room.beBytes + key.beBytes)
         guard response.type == 203, chatWindow?.id == room else { throw KDXError.invalid("Unexpected join reply.") }
+    }
+    private func schedulePublicChatJoin() {
+        guard publicChatRequested, !initializingSession, joining == nil, publicChatJoinTask == nil,
+              isConnected, let wire = connection else { return }
+        publicChatRequested = false
+        let token = UUID(); publicChatJoinToken = token
+        publicChatJoinTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.publicChatJoinToken == token {
+                    self.publicChatJoinTask = nil; self.publicChatJoinToken = nil; self.schedulePublicChatJoin()
+                }
+            }
+            guard self.connection === wire else { return }
+            if self.joining != nil { self.publicChatRequested = true; return }
+            do { try await self.join(room: 1) }
+            catch { if self.connection === wire, !Task.isCancelled { self.lastError = error.localizedDescription } }
+        }
     }
     private func installChatWindow(_ payload: [UInt8]) throws {
         let window = try ChatWindow.decode(payload)
@@ -286,7 +316,7 @@ import Observation
     public func createPrivateChat() async throws {
         guard joining == nil else { throw KDXError.invalid("A room is already being opened.") }
         let token = UUID(); joining = token
-        defer { if joining == token { joining = nil } }
+        defer { if joining == token { joining = nil; schedulePublicChatJoin() } }
         let reply = try await request(type: 200)
         guard reply.type == 216, chatWindow != nil else { throw KDXError.invalid("Unexpected private-chat reply.") }
     }
@@ -584,6 +614,8 @@ import Observation
             joinedRooms[room]?.members.removeAll { $0 == userID }
             if message.type == 205 { joinedRooms[room]?.members.append(userID) }
             updateMemberCount(room: room)
+        case 213:
+            publicChatRequested = true; schedulePublicChatJoin()
         case 212:
             do {
                 let invitation = try ChatInvitation.decode(b)

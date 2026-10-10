@@ -17,6 +17,7 @@ struct ClientView: View {
     @AppStorage("client.login") private var login = ""
     @AppStorage("client.nickname") private var nickname = ""
     @AppStorage("client.info") private var profileInfo = ""
+    @AppStorage("client.autoJoinPublicChat") private var autoJoinPublicChat = true
     @State private var password = ""
     @State private var roomDrafts: [UInt32: String] = [:]
     @State private var privateDrafts: [UInt32: String] = [:]
@@ -143,6 +144,7 @@ struct ClientView: View {
                         TextField("Account", text: $login, prompt: Text("Guest"))
                         SecureField("Password", text: $password)
                         TextField("Nickname", text: $nickname)
+                        Toggle("Open Public Chat on connect", isOn: $autoJoinPublicChat)
                     }.textFieldStyle(.roundedBorder)
                     Button { connect() } label: {
                         HStack { if client.isConnecting { ProgressView().controlSize(.small) }; Text(client.isConnecting ? "Connecting…" : "Connect").frame(maxWidth: .infinity) }
@@ -385,7 +387,7 @@ struct ClientView: View {
     }
     private func connect() {
         guard let value = UInt16(port), value > 0 else { error = "Enter a port between 1 and 65535."; return }
-        perform { try await client.connect(host: host, port: value, login: login, password: password, nickname: nickname, info: profileInfo, table: KDXStorage.loadTable()) }
+        perform { try await client.connect(host: host, port: value, login: login, password: password, nickname: nickname, info: profileInfo, autoJoinPublicChat: autoJoinPublicChat, table: KDXStorage.loadTable()) }
     }
     private func send() {
         let text = draft, target = recipient, room = client.joinedRoom

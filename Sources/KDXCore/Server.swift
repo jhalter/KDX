@@ -265,12 +265,14 @@ public struct ServerLog: Identifiable, Sendable {
             peers[id]?.user = user; users.removeAll { $0.id == user.id }; users.append(user)
             if old == nil {
                 peers[id]?.loginTime = ServerAccount.now
+                try await wire.send(type: 101, payload: KDXUser.encodeList(users))
                 let info = ServerInfo(name: configuration.name, description: configuration.description, userID: user.id, canModifySettings: privileges(for: peers[id]).contains(61), sessionKey: peers[id]?.sessionKey ?? [])
                 try await wire.send(type: 105, payload: info.encode())
                 if configuration.greetingEnabled && !configuration.greeting.isEmpty && !privileges(for: peers[id]).contains(62) { try await wire.send(type: 107, payload: [0,0,0,0] + Array(configuration.greeting.utf8)) }
                 let icon = try configuration.remoteSettings().icon
                 if !icon.isEmpty { try await wire.send(type: 106, payload: icon) }
-                try await wire.send(type: 101, payload: KDXUser.encodeList(users))
+                let access = privileges(for: peers[id])
+                if access.contains(30) && access.contains(36) { try await wire.send(type: 213) }
                 appendHistory(kind: 184, peer: peers[id])
                 record("\(user.nickname) connected")
             } else { appendHistory(kind: 100, peer: peers[id]) }
@@ -590,7 +592,7 @@ extension KDXServer {
             if !effective.contains(40) { peers[peerID]?.monitoringConnections = false }
             if !effective.contains(30) { peers[peerID]?.joined = [] }
             else { peers[peerID]?.joined = Set(oldRooms.filter { room in
-                (try? chatRecord(room)).map { ChatRecord.permits($0.joinClasses, classID: classID) } ?? false
+                (try? chatRecord(room)).map { effective.contains(0) || ChatRecord.permits($0.joinClasses, classID: classID) } ?? false
             }) }
             if let peer = peers[peerID], let userID = peer.user?.id {
                 for roomID in oldRooms.subtracting(peer.joined) { departures.append((roomID, userID, peer.wire)) }
@@ -619,7 +621,7 @@ extension KDXServer {
 extension KDXServer {
     private func requireChatAccess(_ bit: Int, mask: UInt32, peer: Peer?) throws {
         try requirePrivilege(bit, peer: peer)
-        guard ChatRecord.permits(mask, classID: peer?.account?.classID ?? 2) else { throw KDXError.remote(0x10014) }
+        guard privileges(for: peer).contains(0) || ChatRecord.permits(mask, classID: peer?.account?.classID ?? 2) else { throw KDXError.remote(0x10014) }
     }
     private func chatRecord(_ roomID: UInt32) throws -> ChatRecord {
         guard let room = privateChats[roomID]?.room ?? configuration.chats.first(where: { $0.id == roomID }) else { throw KDXError.remote(0x1000c) }
@@ -650,6 +652,7 @@ extension KDXServer {
                 do { try await target.send(type: 212, payload: payload) } catch { target.close() }
             }
         case 214:
+            try requirePrivilege(30, peer: peer)
             let rooms = configuration.chats.map { room in
                 ChatRoom(id: room.id, key: room.key, name: room.name, description: room.description,
                          memberCount: peers.values.filter { $0.joined.contains(room.id) }.count, flags: room.flags)
@@ -734,7 +737,7 @@ extension KDXServer {
         var removed: [(UInt32, WireConnection)] = []
         for peerID in peers.keys {
             guard let peer = peers[peerID], let user = peer.user, peer.joined.contains(room.id),
-                  !ChatRecord.permits(room.joinClasses, classID: peer.account?.classID ?? 2) else { continue }
+                  !privileges(for: peer).contains(0), !ChatRecord.permits(room.joinClasses, classID: peer.account?.classID ?? 2) else { continue }
             peers[peerID]?.joined.remove(room.id); removed.append((user.id, peer.wire))
         }
         return removed

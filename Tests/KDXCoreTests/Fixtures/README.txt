@@ -59,3 +59,10 @@ synthetic-table-import.zip and synthetic-table-descriptor.zip are authored
 test data created with Python's standard zipfile module, not captured Haxial
 content. They contain plain synthetic text, repeated 0..255 bytes, and an empty
 entry. They cover stored/deflated entries and streamed data descriptors.
+
+linux-chat-rooms-43718/60398.*.bin was extracted from
+captures/linux-chat-rooms.pcapng at the same reference commit and MIT license,
+using scripts/extract-capture.py and the public lab password. Port 43718
+covers room records and class privilege 36 toggles (frames 145 and 183);
+port 60398 covers login ordering, empty 213 (frame 167), and Public Chat
+join (frames 175/176). See captures/linux-chat-rooms.md in the reference.

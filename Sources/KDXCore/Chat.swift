@@ -15,6 +15,7 @@ public struct ChatRecord: Identifiable, Codable, Equatable, Sendable {
     public static var publicChat: Self { var chat = Self(name: "Public Chat", description: "Everyone is welcome"); chat.id = 1; return chat }
     func encode() throws -> [UInt8] {
         let strings = try [name, description, third, fourth].map(shortText)
+        guard zip(strings, [63,127,127,63]).allSatisfy({ $0.0.count <= $0.1 }) else { throw KDXError.invalid("Chat name and fourth field allow 63 UTF-8 bytes; description and third field allow 127.") }
         var out = [UInt8](repeating: 0, count: 48)
         out.put(id, at: 0); out.put(key, at: 4)
         out.put(joinClasses, at: 20); out.put(sendClasses, at: 24); out.put(topicClasses, at: 28); out.put(flags, at: 40)
