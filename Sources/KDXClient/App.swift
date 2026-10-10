@@ -18,7 +18,18 @@ struct ClientView: View {
     @AppStorage("client.nickname") private var nickname = ""
     @AppStorage("client.info") private var profileInfo = ""
     @State private var password = ""
-    @State private var draft = ""
+    @State private var roomDrafts: [UInt32: String] = [:]
+    @State private var privateDrafts: [UInt32: String] = [:]
+    private var draft: String {
+        get {
+            if let recipient { return privateDrafts[recipient] ?? "" }
+            return client.joinedRoom.flatMap { roomDrafts[$0] } ?? ""
+        }
+        nonmutating set {
+            if let recipient { privateDrafts[recipient] = newValue }
+            else if let room = client.joinedRoom { roomDrafts[room] = newValue }
+        }
+    }
     @State private var error: String?
     @State private var viewingHistory = false
     @State private var editingServerSettings = false
@@ -63,16 +74,31 @@ struct ClientView: View {
                         Spacer()
                         Button("Create Room", systemImage: "plus") { editingChat = ChatRecord(name: "") }.labelStyle(.iconOnly)
                     }
+                    ScrollView {
+                    LazyVStack(spacing: 2) {
                     ForEach(client.rooms) { room in
                         Button { section = "Chat"; perform { try await client.join(room: room.id, key: room.key) } } label: {
-                            HStack { Image(systemName: "number"); Text(room.name); Spacer(); Text("\(room.memberCount)").foregroundStyle(.secondary) }
+                            HStack {
+                                Image(systemName: client.joinedRooms[room.id] == nil ? "number" : "checkmark.circle.fill")
+                                    .help(client.joinedRooms[room.id] == nil ? "Join room" : "Joined room")
+                                Text(room.name); Spacer()
+                                if let unread = client.unreadRooms[room.id], unread > 0 {
+                                    Text("\(unread)").font(.caption.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Color.accentColor, in: Capsule()).foregroundStyle(.white)
+                                        .accessibilityLabel("\(unread) unread messages")
+                                }
+                                Text("\(room.memberCount)").foregroundStyle(.secondary)
+                            }
                         }.buttonStyle(.plain).padding(8)
                             .background(client.joinedRoom == room.id ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
                             .contextMenu {
+                                if client.joinedRooms[room.id] != nil { Button("Leave Room") { perform { try await client.leaveRoom(room.id) } } }
                                 if room.flags & 1 == 0 { Button("Edit Room…") { perform { editingChat = try await client.chatRecord(id: room.id) } } }
                                 if room.id != 1 { Button("Delete Room…", role: .destructive) { deletingChat = room } }
                             }
                     }
+                    }
+                    }.frame(minHeight: 70, maxHeight: 220)
                     if !client.chatInvitations.isEmpty {
                         Text("CHAT INVITATIONS").font(.caption).foregroundStyle(.secondary)
                         ScrollView {
@@ -132,6 +158,9 @@ struct ClientView: View {
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .item]) { result in
             do { try KDXStorage.importTable(from: result.get()); tableReady = true } catch { self.error = error.localizedDescription }
+        }
+        .onChange(of: client.isConnected) { _, connected in
+            if !connected { roomDrafts = [:]; privateDrafts = [:]; recipient = nil }
         }
         .sheet(isPresented: $viewingHistory) { ServerHistoryView(client: client) }
         .sheet(isPresented: $editingServerSettings) { ServerSettingsView(client: client) }
@@ -295,7 +324,7 @@ struct ClientView: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading).id(line.id)
                             }
                         }.padding()
-                    }.onChange(of: client.chat.count) { _, _ in if let id = client.chat.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
+                    }.onChange(of: client.chat.last?.id) { _, _ in if let id = client.chat.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
                 }
                 Divider()
                 VStack(spacing: 8) {
@@ -306,7 +335,8 @@ struct ClientView: View {
                         }.font(.caption)
                     }
                     HStack {
-                        TextField(recipient == nil ? "Message the room" : "Private message", text: $draft).textFieldStyle(.roundedBorder).onSubmit(send)
+                        TextField(recipient == nil ? "Message the room" : "Private message", text: Binding(get: { draft }, set: { draft = $0 })).textFieldStyle(.roundedBorder).onSubmit(send)
+                            .disabled(recipient == nil && client.joinedRoom == nil)
                         Button("Send", systemImage: "paperplane.fill", action: send).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (recipient == nil && client.joinedRoom == nil))
                     }
                 }.padding()
@@ -340,10 +370,15 @@ struct ClientView: View {
         perform { try await client.connect(host: host, port: value, login: login, password: password, nickname: nickname, info: profileInfo, table: KDXStorage.loadTable()) }
     }
     private func send() {
-        let text = draft
+        let text = draft, target = recipient, room = client.joinedRoom
         perform {
-            if let recipient { try await client.sendPrivate(to: recipient, text: text) } else { try await client.sendChat(text) }
-            draft = ""
+            if let target {
+                try await client.sendPrivate(to: target, text: text)
+                if privateDrafts[target] == text { privateDrafts[target] = "" }
+            } else if let room {
+                try await client.sendChat(text, room: room)
+                if roomDrafts[room] == text { roomDrafts[room] = "" }
+            }
         }
     }
     private func perform(_ action: @escaping @MainActor () async throws -> Void) {

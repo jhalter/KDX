@@ -44,7 +44,7 @@ final class ChatTests: XCTestCase {
         XCTAssertNotEqual(room.id, 0); XCTAssertNotEqual(room.id, 1)
         XCTAssertEqual(try ServerConfiguration.load(from: settings).chats.count, 2)
         try await admin.join(room: room.id)
-        try await eventually { bob.chatWindow?.members.count == 1 }
+        XCTAssertEqual(bob.chatWindow?.members.count, 2, "Opening another room retains Public Chat membership")
         try await admin.sendChat("Only workshop members receive this")
         XCTAssertTrue(admin.chat.contains { $0.text == "Only workshop members receive this" })
         XCTAssertFalse(bob.chat.contains { $0.text == "Only workshop members receive this" })

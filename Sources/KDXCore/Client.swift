@@ -9,9 +9,16 @@ import Observation
     public private(set) var users: [KDXUser] = []
     public var currentUser: KDXUser? { users.first { $0.id == serverInfo?.userID } }
     public private(set) var rooms: [ChatRoom] = []
-    public private(set) var chat: [ChatLine] = []
+    private var chatLines: [ChatLine] = []
+    public var chat: [ChatLine] { chatLines.filter { $0.isPrivate || $0.roomID == joinedRoom } }
+    // joinedRoom is the selected room; joinedRooms tracks every open membership.
     public private(set) var joinedRoom: UInt32?
-    public private(set) var chatWindow: ChatWindow?
+    public private(set) var joinedRooms: [UInt32: ChatWindow] = [:]
+    public var chatWindow: ChatWindow? { joinedRoom.flatMap { joinedRooms[$0] } }
+    public private(set) var unreadRooms: [UInt32: Int] = [:]
+    private var roomTokens: [UInt32: UUID] = [:]
+    private var leavingRooms: [UInt32: UUID] = [:]
+    public func messages(in room: UInt32) -> [ChatLine] { chatLines.filter { $0.roomID == room } }
     public private(set) var chatTopics: [UInt32: ChatTopic] = [:]
     public private(set) var chatInvitations: [ChatInvitation] = []
     public private(set) var history: [RemoteHistoryEntry] = []
@@ -127,7 +134,7 @@ import Observation
         connection?.close(); connection = nil; receiveTask?.cancel(); receiveTask = nil
         for request in pending.values { request.timeout?.cancel(); request.continuation.resume(throwing: KDXError.disconnected) }; pending.removeAll()
         isConnected = false; isConnecting = false; state = "Disconnected"
-        serverInfo = nil; users = []; rooms = []; joinedRoom = nil; chatWindow = nil; chatTopics = [:]; chatInvitations = []; joining = nil; chat = []
+        serverInfo = nil; users = []; rooms = []; joinedRoom = nil; joinedRooms = [:]; unreadRooms = [:]; roomTokens = [:]; leavingRooms = [:]; chatTopics = [:]; chatInvitations = []; joining = nil; chatLines = []
     }
     func checkStatus(_ message: Message) throws {
         guard message.type == 1 else { return }
@@ -219,30 +226,36 @@ import Observation
         let response = try await request(type: 214)
         guard response.type == 215 else { throw KDXError.invalid("Unexpected chat-list reply.") }
         rooms = try ChatRoom.list(response.payload)
-        if let window = chatWindow, !rooms.contains(where: { $0.id == window.id }) {
+        for window in joinedRooms.values.sorted(by: { $0.id < $1.id }) where !rooms.contains(where: { $0.id == window.id }) {
             rooms.append(ChatRoom(id: window.id, key: window.key, name: window.name, description: "Private chat", memberCount: window.members.count, flags: 1))
         }
     }
     public func join(room: UInt32, key: UInt32 = 0) async throws {
+        guard leavingRooms[room] == nil else { throw KDXError.invalid("The room is still closing.") }
         guard joining == nil else { throw KDXError.invalid("A room is already being opened.") }
+        if joinedRooms[room] != nil { joinedRoom = room; unreadRooms.removeValue(forKey: room); return }
         let token = UUID(); joining = token
         defer { if joining == token { joining = nil } }
-        let previous = joinedRoom
         let response = try await request(type: 202, payload: room.beBytes + key.beBytes)
         guard response.type == 203, chatWindow?.id == room else { throw KDXError.invalid("Unexpected join reply.") }
-        if let previous, previous != room { try await sendChecked(type: 204, payload: previous.beBytes); rooms.removeAll { $0.id == previous && $0.flags & 1 != 0 } }
     }
     private func installChatWindow(_ payload: [UInt8]) throws {
         let window = try ChatWindow.decode(payload)
-        if joinedRoom != window.id { chat.removeAll() }
-        chatWindow = window; joinedRoom = window.id
+        joinedRooms[window.id] = window; roomTokens[window.id] = UUID(); joinedRoom = window.id; unreadRooms.removeValue(forKey: window.id)
         if !rooms.contains(where: { $0.id == window.id }) { rooms.append(ChatRoom(id: window.id, key: window.key, name: window.name, description: "Private chat", memberCount: window.members.count, flags: 1)) }
-        updateMemberCount()
+        updateMemberCount(room: window.id)
     }
-    public func leaveRoom() async throws {
-        guard let room = joinedRoom else { return }
+    public func leaveRoom(_ roomID: UInt32? = nil) async throws {
+        guard let room = roomID ?? joinedRoom, let token = roomTokens[room], leavingRooms[room] == nil else { return }
+        leavingRooms[room] = token
+        defer { if leavingRooms[room] == token { leavingRooms.removeValue(forKey: room) } }
         try await sendChecked(type: 204, payload: room.beBytes)
-        if joinedRoom == room { joinedRoom = nil; chatWindow = nil }
+        // A reconnect or a fresh join while the leave unwinds must keep its state.
+        if roomTokens[room] == token { removeMembership(room: room) }
+    }
+    private func removeMembership(room: UInt32) {
+        joinedRooms.removeValue(forKey: room); roomTokens.removeValue(forKey: room); unreadRooms.removeValue(forKey: room); chatTopics.removeValue(forKey: room)
+        if joinedRoom == room { joinedRoom = nil }
         rooms.removeAll { $0.id == room && $0.flags & 1 != 0 }
         if let index = rooms.firstIndex(where: { $0.id == room }) { rooms[index].memberCount = max(0, rooms[index].memberCount-1) }
     }
@@ -250,10 +263,8 @@ import Observation
         guard joining == nil else { throw KDXError.invalid("A room is already being opened.") }
         let token = UUID(); joining = token
         defer { if joining == token { joining = nil } }
-        let previous = joinedRoom
         let reply = try await request(type: 200)
         guard reply.type == 216, chatWindow != nil else { throw KDXError.invalid("Unexpected private-chat reply.") }
-        if let previous { try await sendChecked(type: 204, payload: previous.beBytes); rooms.removeAll { $0.id == previous && $0.flags & 1 != 0 } }
     }
     public func inviteToChat(users: [UInt32]) async throws {
         guard let room = joinedRoom else { throw KDXError.invalid("Join a chat first.") }
@@ -290,8 +301,8 @@ import Observation
         payload.put(room, at: 0); payload[10] = UInt8(bytes.count)
         try await sendChecked(type: 209, payload: payload + bytes)
     }
-    public func sendChat(_ text: String) async throws {
-        guard let room = joinedRoom else { throw KDXError.invalid("Join a chat first.") }
+    public func sendChat(_ text: String, room target: UInt32? = nil) async throws {
+        guard let room = target ?? joinedRoom, joinedRooms[room] != nil else { throw KDXError.invalid("Join a chat first.") }
         let bytes = Array(text.utf8)
         guard !bytes.isEmpty, bytes.count <= 4096 else { throw KDXError.invalid("Chat text must contain 1–4096 UTF-8 bytes.") }
         try await sendChecked(type: 207, payload: room.beBytes + [UInt8](repeating: 0, count: 8) + bytes)
@@ -301,7 +312,8 @@ import Observation
         let bytes = Array(text.utf8)
         guard !bytes.isEmpty, bytes.count <= 4096 else { throw KDXError.invalid("Message must contain 1–4096 UTF-8 bytes.") }
         try await connection.send(type: 300, payload: id.beBytes + [UInt8](repeating: 0, count: 12) + bytes)
-        chat.append(ChatLine(userID: id, sender: "To \(users.first { $0.id == id }?.nickname ?? String(id))", text: text, isPrivate: true))
+        guard self.connection === connection, isConnected else { throw KDXError.disconnected }
+        appendLine(ChatLine(userID: id, sender: "To \(users.first { $0.id == id }?.nickname ?? String(id))", text: text, isPrivate: true))
     }
     public func loadAccounts() async throws {
         let response = try await request(type: 512)
@@ -537,15 +549,17 @@ import Observation
             let (user, _) = try KDXUser.decode(b); users.removeAll { $0.id == user.id }; users.append(user)
         case 104:
             try b.require(4); users.removeAll { $0.id == b.u32(0) }
-            chatWindow?.members.removeAll { $0 == b.u32(0) }; updateMemberCount()
+            for room in joinedRooms.keys {
+                joinedRooms[room]?.members.removeAll { $0 == b.u32(0) }; updateMemberCount(room: room)
+            }
         case 205, 206:
             try b.require(12)
-            guard b.u32(0) == joinedRoom else { break }
-            let userID = b.u32(4)
-            chatWindow?.members.removeAll { $0 == userID }
-            if message.type == 205 { chatWindow?.members.append(userID) }
-            updateMemberCount()
-            if message.type == 206, userID == serverInfo?.userID { rooms.removeAll { $0.id == b.u32(0) && $0.flags & 1 != 0 }; joinedRoom = nil; chatWindow = nil }
+            let room = b.u32(0), userID = b.u32(4)
+            guard joinedRooms[room] != nil else { break }
+            if message.type == 206, userID == serverInfo?.userID { removeMembership(room: room); break }
+            joinedRooms[room]?.members.removeAll { $0 == userID }
+            if message.type == 205 { joinedRooms[room]?.members.append(userID) }
+            updateMemberCount(room: room)
         case 212:
             do {
                 let invitation = try ChatInvitation.decode(b)
@@ -554,11 +568,12 @@ import Observation
                 if chatInvitations.count > 100 { chatInvitations.removeFirst() }
             } catch { lastError = error.localizedDescription }
         case 210:
-            let topic = try ChatTopic.decode(b); chatTopics[topic.roomID] = topic
+            let topic = try ChatTopic.decode(b)
+            if joinedRooms[topic.roomID] != nil { chatTopics[topic.roomID] = topic }
         case 221:
             try b.require(8); let roomID = b.u32(0)
-            rooms.removeAll { $0.id == roomID }; chatTopics.removeValue(forKey: roomID)
-            if joinedRoom == roomID { joinedRoom = nil; chatWindow = nil }
+            removeMembership(room: roomID); rooms.removeAll { $0.id == roomID }
+            chatInvitations.removeAll { $0.roomID == roomID }
 
         case 105: serverInfo = try ServerInfo.decode(b)
         case 111:
@@ -566,18 +581,23 @@ import Observation
             if let index = users.firstIndex(where: { $0.id == b.u32(0) }) { users[index].status = b[4] }
         case 208:
             try b.require(12)
-            guard b.u32(0) == joinedRoom else { return }
-            appendLine(id: b.u32(4), text: b.text(12..<b.count), privateMessage: false)
+            let room = b.u32(0)
+            guard joinedRooms[room] != nil else { return }
+            appendLine(id: b.u32(4), text: b.text(12..<b.count), privateMessage: false, room: room)
+            if joinedRoom != room { unreadRooms[room] = min(2000, (unreadRooms[room] ?? 0) + 1) }
         case 301:
             try b.require(17); appendLine(id: b.u32(0), text: b.text(16..<b.count), privateMessage: true)
         default: break
         }
     }
-    private func updateMemberCount() {
-        if let window = chatWindow, let index = rooms.firstIndex(where: { $0.id == window.id }) { rooms[index].memberCount = window.members.count }
+    private func updateMemberCount(room: UInt32) {
+        if let window = joinedRooms[room], let index = rooms.firstIndex(where: { $0.id == room }) { rooms[index].memberCount = window.members.count }
     }
-    private func appendLine(id: UInt32, text: String, privateMessage: Bool) {
-        chat.append(ChatLine(userID: id, sender: users.first { $0.id == id }?.nickname ?? "User \(id)", text: text, isPrivate: privateMessage))
-        if chat.count > 2000 { chat.removeFirst(chat.count - 2000) }
+    private func appendLine(id: UInt32, text: String, privateMessage: Bool, room: UInt32? = nil) {
+        appendLine(ChatLine(userID: id, sender: users.first { $0.id == id }?.nickname ?? "User \(id)", text: text, isPrivate: privateMessage, roomID: room))
+    }
+    private func appendLine(_ line: ChatLine) {
+        chatLines.append(line)
+        if chatLines.count > 2000 { chatLines.removeFirst(chatLines.count - 2000) }
     }
 }

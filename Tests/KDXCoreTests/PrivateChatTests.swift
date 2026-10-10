@@ -57,7 +57,8 @@ final class PrivateChatTests: XCTestCase {
         _ = try await admin.request(type: 108)
         XCTAssertEqual(admin.chat.last?.text, "Only room members"); XCTAssertTrue(outsider.chat.isEmpty)
         try await admin.join(room: 1)
-        XCTAssertFalse(admin.rooms.contains { $0.id == window.id })
+        XCTAssertTrue(admin.rooms.contains { $0.id == window.id })
+        try await admin.leaveRoom(window.id)
         try await member.sendChat("Still here")
         try await member.leaveRoom()
         do { try await admin.join(room: window.id, key: window.key); XCTFail("Empty private room survived") }
@@ -74,7 +75,7 @@ final class PrivateChatTests: XCTestCase {
         do { try await guest.createPrivateChat(); XCTFail("Guest created room") }
         catch KDXError.remote(let code) { XCTAssertEqual(code, 0x10014) }
         var rooms = [ChatWindow]()
-        // Direct requests keep multiple server memberships, like a multiwindow legacy client.
+        // Both the client model and server retain all ten private memberships.
         for _ in 0..<10 { let reply = try await member.request(type: 200); rooms.append(try ChatWindow.decode(reply.payload)) }
         XCTAssertEqual(Set(rooms.map(\.id)).count, 10)
         do { _ = try await member.request(type: 200); XCTFail("Created eleventh private room") }
