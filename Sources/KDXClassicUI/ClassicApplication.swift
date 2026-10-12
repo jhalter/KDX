@@ -68,6 +68,11 @@ import KDXCore
         let main = NSMenu()
         let app = NSMenu(); app.addItem(menuItem("About \(applicationName)") { [weak self] in self?.bar.showMessage("AppKit client using KDXCore. Includes the original KDX themes, artwork and fonts. Visual fidelity is provisional.", title: self?.applicationName ?? "KDX") })
         app.addItem(menuItem("Appearances…") { [weak self] in self?.showAppearances() })
+        app.addItem(.separator())
+        let hide = NSMenuItem(title:"Hide \(applicationName)",action:#selector(NSApplication.hide(_:)),keyEquivalent:"h")
+        hide.keyEquivalentModifierMask = .command
+        hide.target = NSApplication.shared
+        app.addItem(hide)
         app.addItem(.separator()); app.addItem(menuItem("Quit \(applicationName)", key: "q") { NSApplication.shared.terminate(nil) })
         let file = NSMenu(); file.addItem(menuItem("Connect…",key:"k") { [weak self] in self?.showConnect() }); file.addItem(menuItem("Address Book…",key:"b") { [weak self] in self?.showAddressBook() })
         file.addItem(menuItem("Import Challenge Table…") { [weak self] in self?.importTable() })
