@@ -21,10 +21,13 @@ for product in KDXClient KDXServer; do
     cp "$bin_path/$product" "$bundle/Contents/MacOS/.$product.new"
     mv -f "$bundle/Contents/MacOS/.$product.new" "$bundle/Contents/MacOS/$product"
     cp Notices/*.txt "$bundle/Contents/Resources/Notices/"
-    icon_plist=""
-    if [[ "$product" != KDXServer ]]; then
+    if [[ "$product" == KDXServer ]]; then
+        cp Resources/ServerIcon/ServerIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
+    else
         cp Resources/AppIcon/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
-        icon_plist='<key>CFBundleIconFile</key><string>AppIcon.icns</string>'
+    fi
+    icon_plist='<key>CFBundleIconFile</key><string>AppIcon.icns</string>'
+    if [[ "$product" != KDXServer ]]; then
         cp "$appearance_catalog" "$bundle/Contents/Resources/OriginalAppearances.json"
         "$bin_path/KDXAppearanceTool" verify "$bundle/Contents/Resources/OriginalAppearances.json"
     fi
