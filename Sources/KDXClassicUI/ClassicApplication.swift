@@ -66,7 +66,7 @@ import KDXCore
     }
     func installMenus() {
         let main = NSMenu()
-        let app = NSMenu(); app.addItem(menuItem("About \(applicationName)") { [weak self] in self?.bar.showMessage("AppKit client using KDXCore. Includes the original KDX themes, artwork and fonts. Visual fidelity is provisional.", title: self?.applicationName ?? "KDX") })
+        let app = NSMenu(); app.addItem(menuItem("About \(applicationName)") { [weak self] in self?.showAbout() })
         app.addItem(menuItem("Appearances…") { [weak self] in self?.showAppearances() })
         app.addItem(.separator())
         let hide = NSMenuItem(title:"Hide \(applicationName)",action:#selector(NSApplication.hide(_:)),keyEquivalent:"h")
@@ -85,6 +85,16 @@ import KDXCore
         window.addItem(menuItem("Button Bar") { [weak self] in if let self, let bar = self.bar { self.restore(bar) } })
         for (name, menu) in [(applicationName,app),("File",file),("Edit",edit),("Window",window)] { let item = NSMenuItem(); item.title = name; item.submenu = menu; main.addItem(item) }
         NSApplication.shared.mainMenu = main
+    }
+    func showAbout() {
+        // A standalone borderless window keeps the HAP frame square; AppKit's
+        // attached sheet presentation adds its own rounded frame.
+        showUtility("about") {
+            let request = ClassicDialogRequest(title:applicationName,message:"AppKit client using KDXCore. Includes the original KDX themes, artwork and fonts. Visual fidelity is provisional.",cancelTitle:nil)
+            let dialog = ClassicDialogController(request:request,preferences:preferences)
+            dialog.responseRequested = { [weak dialog] _ in dialog?.window?.close() }
+            return dialog
+        }
     }
     var activeController: ClassicWindowController? { NSApplication.shared.keyWindow?.windowController as? ClassicWindowController }
     private func confirmationOwner() -> ClassicWindowController? {
