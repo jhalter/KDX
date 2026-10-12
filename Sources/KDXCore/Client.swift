@@ -55,7 +55,9 @@ import Observation
     }
     private var checkedOperations: [UInt32: CheckedOperation] = [:]
     public private(set) var files: [RemoteFile] = []
+    public private(set) var catalogProgress: CatalogProgress?
     public private(set) var filePath: [String] = []
+    private var selectedFilePath = RemotePath([])
     public private(set) var transferProgress: Double = 0
     public private(set) var transferStatus: String?
     private var transferFactory: (() throws -> WireConnection)?
@@ -71,12 +73,17 @@ import Observation
     }
     private var pending: [UInt32: PendingRequest] = [:]
     var requestTimeout: Duration = .seconds(15)
+    @ObservationIgnored var networkFactory: (String, UInt16) throws -> WireConnection = { try WireConnection(host: $0, port: $1) }
     public init() {}
     public func connect(host: String, port: UInt16, login: String, password: String, nickname: String, info: String = "", autoJoinPublicChat: Bool = true, table: ChallengeTable) async throws {
-        let wire = try WireConnection(host: host, port: port)
+        let wire = try networkFactory(host, port)
         try await connect(wire: wire, login: login, password: password, nickname: nickname, info: info, autoJoinPublicChat: autoJoinPublicChat, table: table)
         guard connection === wire else { throw KDXError.disconnected }
-        transferFactory = { try WireConnection(host: host, port: port) }
+        transferFactory = { [weak self] in
+            let advertised = self?.serverInfo?.transferPort ?? 0
+            guard let self else { throw KDXError.disconnected }
+            return try self.networkFactory(host, advertised == 0 ? port : advertised)
+        }
     }
     func connect(wire: WireConnection, login: String, password: String, nickname: String, info: String = "", autoJoinPublicChat: Bool = true, table: ChallengeTable) async throws {
         disconnect()
@@ -144,7 +151,7 @@ import Observation
         connectionMonitorToken = nil
         history = []; isViewingHistory = false; historyLoadToken = nil; historyLoaded = false
         accounts = []; accountClasses = []; sessionLogin = ""
-        files = []; filePath = []; transferStatus = nil; newsGroups = []; newsPosts = []; newsPermissions = 0; newsGroupID = nil; newsLoadToken = nil; checkedOperations = [:]
+        files = []; filePath = []; selectedFilePath = RemotePath([]); catalogProgress = nil; transferStatus = nil; newsGroups = []; newsPosts = []; newsPermissions = 0; newsGroupID = nil; newsLoadToken = nil; checkedOperations = [:]
         connection?.close(); connection = nil; receiveTask?.cancel(); receiveTask = nil
         for request in pending.values { request.timeout?.cancel(); request.continuation.resume(throwing: KDXError.disconnected) }; pending.removeAll()
         isConnected = false; isConnecting = false; state = "Disconnected"
@@ -493,20 +500,71 @@ import Observation
         if let error = operation.error { throw error }
     }
     func setTransferFactory(_ factory: @escaping () throws -> WireConnection) { transferFactory = factory }
-    public func fileInformation(path: [String]) async throws -> RemoteFileInformation {
-        let response = try await request(type: 409, payload: RemotePath(path).encode())
+    public func fileInformation(path: [String]) async throws -> RemoteFileInformation { try await fileInformation(path: RemotePath(path)) }
+    public func fileInformation(path: RemotePath) async throws -> RemoteFileInformation {
+        let response = try await request(type: 409, payload: path.encode())
         guard response.type == 410 else { throw KDXError.invalid("Unexpected file-information reply.") }
         return try RemoteFileInformation.decode(response.payload)
     }
+    public func itemInformation(path: RemotePath) async throws -> FileOrVolumeInformation {
+        let reply = try await request(type: 409, payload: path.encode())
+        switch reply.type {
+        case 410: return .file(try RemoteFileInformation.decode(reply.payload))
+        case 422: return .volume(try VolumeInformation.decode(reply.payload))
+        default: throw KDXError.invalid("Unexpected information reply.")
+        }
+    }
+    public func createFolder(name: String, at path: RemotePath, access: String = "", owner: String = "") async throws {
+        try RemotePath.validateName(name)
+        try await sendChecked(type: 402, payload: CreateFolderRequest(path: path, name: name, access: access, owner: owner).encode())
+    }
+    public func moveFiles(_ files: [RemoteFile], from source: RemotePath, to destination: RemotePath) async throws {
+        guard !files.isEmpty else { return }
+        try await sendChecked(type: 407, payload: MoveItemsRequest(destination: destination, source: source, items: RemotePath(components: files.map(\.nameBytes))).encode())
+    }
+    public func trashFiles(_ files: [RemoteFile], at folder: RemotePath) async throws {
+        guard !files.isEmpty else { return }
+        try await sendChecked(type: 405, payload: TrashItemsRequest(folder: folder, items: RemotePath(components: files.map(\.nameBytes))).encode())
+    }
+    public func renameFile(_ file: RemoteFile, at folder: RemotePath, to name: String) async throws {
+        try RemotePath.validateName(name)
+        try await sendChecked(type: 411, payload: SetFileInfoRequest(path: folder.appending(file), name: Array(name.utf8)).encode())
+    }
+    public func emptyTrash() async throws { try await sendChecked(type: 421, payload: []) }
+    public func generateCatalog(cancel: Bool = false) async throws {
+        if cancel { catalogProgress = nil } else { catalogProgress = CatalogProgress(complete: false, count: 0) }
+        do { try await sendChecked(type: 450, payload: cancel ? UInt32(1).beBytes : []) }
+        catch { catalogProgress = nil; throw error }
+    }
+    public func searchFiles(_ query: String) async throws -> [FileSearchResult] {
+        let text = try shortText(query); guard text.count >= 3 else { throw KDXError.invalid("Search needs at least three UTF-8 bytes.") }
+        var b = [UInt8](repeating: 0, count: 88); b[84] = UInt8(text.count); b += text
+        let reply = try await request(type: 452, payload: b)
+        guard reply.type == 453 else { throw KDXError.invalid("Unexpected search reply.") }; return try FileSearchResult.decodeList(reply.payload)
+    }
+    public func folderAccessList() async throws -> [FolderAccessSummary] {
+        let reply = try await request(type: 1106)
+        guard reply.type == 1107 else { throw KDXError.invalid("Unexpected folder access list.") }; return try FolderAccessSummary.decodeList(reply.payload)
+    }
+    public func folderAccess(name: String) async throws -> FolderAccess {
+        let reply = try await request(type: 1103, payload: Array(name.utf8))
+        guard reply.type == 1104 else { throw KDXError.invalid("Unexpected folder access reply.") }; return try FolderAccess.decode(reply.payload)
+    }
+    public func saveFolderAccess(_ item: FolderAccess, creating: Bool) async throws {
+        try item.validate(); try await sendChecked(type: creating ? 1100 : 1105, payload: item.encode())
+    }
+    public func deleteFolderAccess(name: String) async throws { try await sendChecked(type: 1101, payload: Array(name.utf8)) }
     /// Returns a listing without changing the legacy selected-folder properties.
-    public func files(at path: [String]) async throws -> [RemoteFile] {
-        let response = try await request(type: 400, payload: RemotePath(path).encode())
+    public func files(at path: [String]) async throws -> [RemoteFile] { try await files(at: RemotePath(path)) }
+    public func files(at path: RemotePath) async throws -> [RemoteFile] {
+        let response = try await request(type: 400, payload: path.encode())
         guard response.type == 401 else { throw KDXError.invalid("Unexpected file-list reply.") }
         return try RemoteFile.decodeList(response.payload)
     }
-    public func listFiles(path: [String] = []) async throws {
+    public func listFiles(path: [String] = []) async throws { try await listFiles(path: RemotePath(path)) }
+    public func listFiles(path: RemotePath) async throws {
         let entries = try await files(at: path)
-        files = entries; filePath = path
+        files = entries; filePath = path.names; selectedFilePath = path
     }
     public func markRoomRead(_ room: UInt32) { if unreadRooms[room] != nil { unreadRooms.removeValue(forKey: room) } }
     public func selectRoom(_ room: UInt32?) {
@@ -532,18 +590,19 @@ import Observation
         } catch { wire.close(); if activeTransfer === wire { activeTransfer = nil }; throw error }
     }
     public func download(_ file: RemoteFile, to destination: URL) async throws {
-        try await download(file, at: filePath, to: destination)
+        try await download(file, at: selectedFilePath, to: destination)
     }
     /// The folder is captured by the caller; browsing cannot redirect a queued download.
-    public func download(_ file: RemoteFile, at folder: [String], to destination: URL) async throws {
+    public func download(_ file: RemoteFile, at folder: [String], to destination: URL) async throws { try await download(file, at: RemotePath(folder), to: destination) }
+    public func download(_ file: RemoteFile, at folder: RemotePath, to destination: URL) async throws {
         guard let connection else { throw KDXError.disconnected }
-        let path = folder + [file.name]
-        let identity = DownloadIdentity(server: connection.endpointDescription, account: sessionLogin, path: path, destination: destination.lastPathComponent)
+        let path = folder.appending(file)
+        let identity = DownloadIdentity(server: connection.endpointDescription, account: sessionLogin, path: path.names, destination: destination.lastPathComponent, rawPath: path.components.contains(where: { String(bytes: $0, encoding: .utf8) == nil }) ? path.components : nil)
         let staging = try PartialDownload(destination: destination, identity: identity)
         let wire = try await attach()
         defer { wire.close(); if activeTransfer === wire { activeTransfer = nil; transferStatus = nil } }
         transferStatus = "\(staging.offset == 0 ? "Downloading" : "Resuming") \(file.name)"; transferProgress = 0
-        let tx = try await wire.send(type: 412, payload: DownloadRequest(path: RemotePath(path), dataOffset: staging.offset, resourceOffset: staging.resourceOffset).encode())
+        let tx = try await wire.send(type: 412, payload: DownloadRequest(path: path, dataOffset: staging.offset, resourceOffset: staging.resourceOffset).encode())
         let reply = try await wire.receive(); try checkStatus(reply)
         guard reply.type == 413, reply.transaction == tx, reply.isReply else { throw KDXError.invalid("Unexpected download reply.") }
         let info = try DownloadInfo(wire: reply.payload), size = info.dataSize
@@ -566,11 +625,12 @@ import Observation
         try staging.commit(); transferProgress = 1
     }
     public func upload(from source: URL) async throws {
-        let folder = filePath
+        let folder = selectedFilePath
         try await upload(from: source, to: folder)
-        if filePath == folder { try await listFiles(path: folder) }
+        if selectedFilePath == folder { try await listFiles(path: folder) }
     }
-    public func upload(from source: URL, to folder: [String]) async throws {
+    public func upload(from source: URL, to folder: [String]) async throws { try await upload(from: source, to: RemotePath(folder)) }
+    public func upload(from source: URL, to folder: RemotePath) async throws {
         let wire = try await attach()
         defer { wire.close(); if activeTransfer === wire { activeTransfer = nil; transferStatus = nil } }
         transferStatus = "Uploading \(source.lastPathComponent)"; transferProgress = 0
@@ -578,7 +638,7 @@ import Observation
         let (handle, size) = try store.openFile([source.lastPathComponent]); defer { try? handle.close() }
         let resourceSize = try ResourceFork.size(handle.fileDescriptor), total = size + resourceSize
         guard size <= UInt32.max, resourceSize <= UInt32.max else { throw KDXError.invalid("A file fork exceeds the KDX limit of 4 GiB.") }
-        var request = UploadRequest(dataSize: size, name: source.lastPathComponent, folder: RemotePath(folder)); request.resourceSize = resourceSize
+        var request = UploadRequest(dataSize: size, name: source.lastPathComponent, folder: folder); request.resourceSize = resourceSize
         let tx = try await wire.send(type: 415, payload: request.encode())
         let reply = try await wire.receive(); try checkStatus(reply)
         guard reply.type == 416, reply.transaction == tx, reply.isReply else { throw KDXError.invalid("Unexpected upload reply.") }
@@ -605,6 +665,8 @@ import Observation
                 if let operation = checkedOperations[message.transaction] { operation.error = error }
                 else { lastError = error.localizedDescription }
             }
+        case 451: catalogProgress = try CatalogProgress.decode(b)
+        case 1102: break // Asynchronous folder-access deletion notification.
         case 183:
             guard isViewingHistory, historyLoaded else { break }
             let (entry, used) = try RemoteHistoryEntry.decode(b)

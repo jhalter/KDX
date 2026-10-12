@@ -30,7 +30,7 @@ public struct NewsGroupInfo: Codable, Identifiable, Equatable, Sendable {
         _ = try value.encode(); return value
     }
     func validate() throws {
-        guard !name.isEmpty, sizeLimitKiB > 0 else { throw KDXError.invalid("A newsgroup needs a name and a positive storage limit.") }
+        guard !name.isEmpty, (4...1024).contains(sizeLimitKiB) else { throw KDXError.invalid("A newsgroup needs a name and an archive threshold between 4 and 1024 KiB.") }
         _ = try encode()
     }
 }

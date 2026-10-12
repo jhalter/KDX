@@ -132,7 +132,8 @@ public struct ClassicWindowKey: Hashable, Sendable {
 public enum ClassicTransferState: String, Sendable { case queued, running, stopping, stopped, failed, complete }
 @Observable @MainActor public final class ClassicTransfer: Identifiable {
     public let id = UUID()
-    public let folder: [String]
+    public var folder: [String] { remoteFolder.names }
+    public let remoteFolder: RemotePath
     public let localURL: URL
     public let file: RemoteFile?
     public var state: ClassicTransferState = .queued
@@ -140,7 +141,8 @@ public enum ClassicTransferState: String, Sendable { case queued, running, stopp
     public var progress = 0.0
     public var name: String { file?.name ?? localURL.lastPathComponent }
     public var isUpload: Bool { file == nil }
-    public init(folder: [String], localURL: URL, file: RemoteFile? = nil) { self.folder = folder; self.localURL = localURL; self.file = file }
+    public convenience init(folder: [String], localURL: URL, file: RemoteFile? = nil) { self.init(remoteFolder: RemotePath(folder), localURL: localURL, file: file) }
+    public init(remoteFolder: RemotePath, localURL: URL, file: RemoteFile? = nil) { self.remoteFolder = remoteFolder; self.localURL = localURL; self.file = file }
 }
 
 @Observable @MainActor public final class ClassicTransferQueue {
@@ -153,8 +155,8 @@ public enum ClassicTransferState: String, Sendable { case queued, running, stopp
     public var hasPending: Bool { items.contains { [.queued,.running,.stopping].contains($0.state) } }
     public init(client: KDXClient) {
         perform = { item in
-            if let file = item.file { try await client.download(file, at: item.folder, to: item.localURL) }
-            else { try await client.upload(from: item.localURL, to: item.folder) }
+            if let file = item.file { try await client.download(file, at: item.remoteFolder, to: item.localURL) }
+            else { try await client.upload(from: item.localURL, to: item.remoteFolder) }
         }
         cancel = { client.cancelTransfer() }; progress = { client.transferProgress }
     }

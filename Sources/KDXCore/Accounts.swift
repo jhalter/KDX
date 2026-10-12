@@ -27,7 +27,8 @@ public struct AccountPrivileges: Codable, Equatable, Sendable {
         var result = Self(); for bit in bits { result.set(bit, true) }; return result
     }
     public static let editable: [(bit: Int, name: String)] = [
-        (0, "Administrator override"), (10, "Download files"), (11, "Upload files"), (20, "View file attributes"),
+        (0, "Administrator override"), (4, "Can login"), (10, "Download files"), (11, "Upload files"), (13, "Empty trash"), (16, "Move files"), (17, "Rename files"), (18, "Trash files"), (20, "Set file attributes"),
+        (22, "View volume information"), (27, "View folder access"), (28, "Modify folder access"),
         (30, "Join chats"), (31, "Send chat"), (32, "Send private messages"), (35, "Set chat topics"), (36, "Join Public Chat on connect"),
         (33, "Send broadcasts"), (34, "Create private chats"), (37, "Manage chats"), (40, "View user information and connections"), (41, "Disconnect users"), (42, "Cannot be disconnected remotely"),
         (50, "View accounts"), (51, "Create accounts"), (52, "Modify accounts"),
@@ -42,30 +43,65 @@ public struct AccountClass: Identifiable, Codable, Equatable, Sendable {
     public var name: String
     public var privileges: AccountPrivileges
     var time: UInt64 = 0
-    var unknown25: UInt8 = 0
+    public var floodLimit: UInt8 = 0
+    var unknown25: UInt8 { get { floodLimit } set { floodLimit = newValue } }
+    var extra26: [UInt8] = [0, 0]
+    public var second = ""
+    public var editor = ""
     var afterIndex: [UInt8] = [0, 0, 0]
     public init(id: UInt8, name: String, privileges: AccountPrivileges = AccountPrivileges()) {
         self.id = id; self.name = name; self.privileges = privileges
     }
+    private enum CodingKeys: String, CodingKey { case id, name, privileges, time, unknown25, floodLimit, afterIndex, extra26, second, editor }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UInt8.self, forKey: .id); name = try c.decode(String.self, forKey: .name)
+        privileges = try c.decode(AccountPrivileges.self, forKey: .privileges)
+        time = try c.decodeIfPresent(UInt64.self, forKey: .time) ?? 0
+        floodLimit = try c.decodeIfPresent(UInt8.self, forKey: .floodLimit) ?? c.decodeIfPresent(UInt8.self, forKey: .unknown25) ?? 0
+        afterIndex = try c.decodeIfPresent([UInt8].self, forKey: .afterIndex) ?? [0,0,0]
+        extra26 = try c.decodeIfPresent([UInt8].self, forKey: .extra26) ?? [0,0]
+        second = try c.decodeIfPresent(String.self, forKey: .second) ?? ""
+        editor = try c.decodeIfPresent(String.self, forKey: .editor) ?? ""
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id); try c.encode(name, forKey: .name); try c.encode(privileges, forKey: .privileges)
+        try c.encode(time, forKey: .time); try c.encode(floodLimit, forKey: .floodLimit)
+        try c.encode(afterIndex, forKey: .afterIndex); try c.encode(extra26, forKey: .extra26)
+        try c.encode(second, forKey: .second); try c.encode(editor, forKey: .editor)
+    }
     public static let defaults: [AccountClass] = [
-        AccountClass(id: 0, name: "Administrator", privileges: .enabled([0,10,11,20,30,31,32,33,34,35,37,40,41,50,51,52,53,60,61,63,70,71,72,73,74])),
-        AccountClass(id: 1, name: "Member", privileges: .enabled([10,11,20,30,31,32,34,35,40,53,60,70,71,74])),
-        AccountClass(id: 2, name: "Guest", privileges: .enabled([10,30,31,32,60,70]))
+        AccountClass(id: 0, name: "Administrator", privileges: .enabled([0,4,10,11,13,16,17,18,20,22,27,28,30,31,32,33,34,35,37,40,41,50,51,52,53,60,61,63,70,71,72,73,74])),
+        AccountClass(id: 1, name: "Member", privileges: .enabled([4,10,11,20,30,31,32,34,35,40,53,60,70,71,74])),
+        AccountClass(id: 2, name: "Guest", privileges: .enabled([4,10,30,31,32,60,70]))
     ]
     func encode(info: Bool, padded: Bool = true) throws -> [UInt8] {
         let indexAt = info ? 48 : 40, name = try shortText(name)
-        guard id < 32, afterIndex.count == 3 else { throw KDXError.invalid("Invalid account class.") }
+        guard id < 32, afterIndex.count == 3, extra26.count == 2 else { throw KDXError.invalid("Invalid account class.") }
         var out = [UInt8](repeating: 0, count: indexAt + 8)
         out.replaceSubrange(0..<16, with: privileges.bytes); out.put(time, at: 16); out[37] = unknown25
         out[indexAt] = id; out.replaceSubrange(indexAt+1..<indexAt+4, with: afterIndex); out[indexAt+4] = UInt8(name.count)
-        out += name; if padded { out.pad(4) }; return out
+        out.replaceSubrange(38..<40, with: extra26)
+        out += name
+        if info {
+            let second = try shortText(second), editor = try shortText(editor)
+            out[53] = UInt8(second.count); out[54] = UInt8(editor.count); out += second + editor
+        }
+        if padded { out.pad(4) }; return out
     }
     static func decode(_ b: [UInt8], info: Bool) throws -> (Self, Int) {
         let indexAt = info ? 48 : 40
-        try b.require(indexAt+8); let end = indexAt+8+Int(b[indexAt+4]); try b.require(end)
+        try b.require(indexAt+8); guard b[indexAt] < 32 else { throw KDXError.invalid("Invalid account class index.") }; let end = indexAt+8+Int(b[indexAt+4]); try b.require(end)
         var result = AccountClass(id: b[indexAt], name: b.text(indexAt+8..<end), privileges: try AccountPrivileges(bytes: Array(b[..<16])))
         result.time = b.u64(16); result.unknown25 = b[37]; result.afterIndex = Array(b[indexAt+1..<indexAt+4])
-        return (result, (end+3) & ~3)
+        result.extra26 = Array(b[38..<40])
+        var used = end
+        if info {
+            let secondEnd = end + Int(b[53]), editorEnd = end + Int(b[53]) + Int(b[54]); try b.require(editorEnd)
+            result.second = b.text(end..<secondEnd); result.editor = b.text(secondEnd..<editorEnd); used = editorEnd
+        }
+        return (result, (used+3) & ~3)
     }
     static func encodeList(_ classes: [Self]) throws -> [UInt8] {
         var out = UInt32(classes.count).beBytes
@@ -212,6 +248,6 @@ public struct ServerAccount: Codable, Identifiable, Equatable, Sendable {
         third = record.third; unknown77 = record.unknown77; self.editor = editor
         modified = Self.now; if creating { created = modified }
     }
-    // The reference's timestamp samples fit milliseconds since 1900 (epoch remains inferred upstream).
+    // Milliseconds since 1900, verified upstream against the original server.
     static var now: UInt64 { KDXTime.encode(Date()) }
 }

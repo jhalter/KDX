@@ -7,6 +7,7 @@ struct DownloadIdentity: Codable {
     let account: String
     let path: [String]
     let destination: String
+    var rawPath: [[UInt8]]? = nil
     func digest() throws -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         return SHA256.hash(data: try encoder.encode(self)).map { String(format: "%02x", $0) }.joined()

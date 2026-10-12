@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract one TCP session from a local Ethernet/IPv4 pcapng reference capture.
 
-Usage: python3 -I scripts/extract-capture.py CAPTURE CLIENT_PORT OUTPUT_PREFIX
+Usage: python3 -I scripts/extract-capture.py CAPTURE CLIENT_PORT OUTPUT_PREFIX [SERVER_PORT]
 Only recorded bytes are read; this script never opens a network connection.
 """
 import pathlib
@@ -10,6 +10,7 @@ import sys
 
 capture = pathlib.Path(sys.argv[1]).read_bytes()
 port = int(sys.argv[2])
+server_port = int(sys.argv[4]) if len(sys.argv) > 4 else 10700
 prefix = pathlib.Path(sys.argv[3])
 endian = "<"
 interfaces = []
@@ -42,7 +43,7 @@ while at < len(capture):
             tcp = ip[(ip[0] & 15) * 4:total]
             if len(tcp) >= 20:
                 source, destination, sequence = struct.unpack_from(">HHI", tcp)
-                side = "c2s" if (source, destination) == (port, 10700) else "s2c" if (source, destination) == (10700, port) else None
+                side = "c2s" if (source, destination) == (port, server_port) else "s2c" if (source, destination) == (server_port, port) else None
                 payload = tcp[(tcp[12] >> 4) * 4:]
                 if side and payload:
                     old = segments[side].get(sequence)

@@ -2,7 +2,9 @@ import Foundation
 import Darwin
 
 public struct RemoteFile: Identifiable, Sendable {
-    public var id: String { name }
+    public var id: String { Data(nameBytes).base64EncodedString() }
+    public var nameBytes: [UInt8] { rawName ?? Array(name.utf8) }
+    var rawName: [UInt8]? = nil
     public var name: String
     public var size: UInt64
     public var isDirectory: Bool
@@ -16,7 +18,7 @@ public struct RemoteFile: Identifiable, Sendable {
         var at = 4, files = [RemoteFile]()
         for _ in 0..<b.u32(0) {
             try b.require(at+56); let n = Int(b[at+53]), k = Int(b[at+54]); try b.require(at+56+n+k)
-            files.append(RemoteFile(name: b.text(at+56..<at+56+n), size: b.u64(at), isDirectory: b.u32(at+32) & 2 != 0, modified: KDXTime.decode(b.u64(at+16)), created: b.u64(at+8) == 0 ? nil : KDXTime.decode(b.u64(at+8)), kind: b.text(at+56+n..<at+56+n+k), header: Array(b[at..<at+56])))
+            files.append(RemoteFile(rawName: Array(b[at+56..<at+56+n]), name: b.text(at+56..<at+56+n), size: b.u64(at), isDirectory: b.u32(at+32) & 2 != 0, modified: KDXTime.decode(b.u64(at+16)), created: b.u64(at+8) == 0 ? nil : KDXTime.decode(b.u64(at+8)), kind: b.text(at+56+n..<at+56+n+k), header: Array(b[at..<at+56])))
             at += min((56+n+k+3) & ~3, b.count-at)
         }
         return files
@@ -25,7 +27,8 @@ public struct RemoteFile: Identifiable, Sendable {
         if files.isEmpty { return [] }
         var out = UInt32(files.count).beBytes
         for file in files {
-            let name = try shortText(file.name), kind = try shortText(file.kind)
+            let name = file.nameBytes, kind = try shortText(file.kind)
+            try RemotePath.validateBytes(name)
             var b = file.header ?? [UInt8](repeating: 0, count: 56)
             guard b.count == 56 else { throw KDXError.invalid("Invalid file-list header.") }
             b.put(file.size, at: 0); b.put(file.created.map(KDXTime.encode) ?? 0, at: 8); b.put(KDXTime.encode(file.modified), at: 16)
@@ -40,31 +43,49 @@ public struct RemoteFile: Identifiable, Sendable {
         return out
     }
 }
-struct RemotePath: Equatable {
-    let names: [String]
-    init(_ names: [String]) { self.names = names }
-    static func validateName(_ name: String) throws {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.utf8.contains(0), !name.hasPrefix(".kdx-"), name.utf8.count <= 255 else { throw KDXError.remote(0x10014) }
+/// A remote path retains the server's exact filename bytes independently of display text.
+public struct RemotePath: Equatable, Hashable, Sendable {
+    public let components: [[UInt8]]
+    public var names: [String] { components.map { String(decoding: $0, as: UTF8.self) } }
+    public init(_ names: [String]) { components = names.map { Array($0.utf8) } }
+    public init(components: [[UInt8]]) { self.components = components }
+    public func appending(_ file: RemoteFile) -> Self { Self(components: components + [file.nameBytes]) }
+    public func prefix(_ count: Int) -> Self { Self(components: Array(components.prefix(count))) }
+    public var parent: Self { Self(components: Array(components.dropLast())) }
+    static func validateName(_ name: String) throws { try validateBytes(Array(name.utf8)) }
+    static func validateBytes(_ bytes: [UInt8]) throws {
+        guard !bytes.isEmpty, bytes.count <= 255, bytes != [46], bytes != [46,46], !bytes.contains(47), !bytes.contains(0), !bytes.starts(with: Array(".kdx-".utf8)) else { throw KDXError.remote(0x10014) }
     }
-    func encode() throws -> [UInt8] {
-        guard names.count <= 1024 else { throw KDXError.invalid("Path is too deep.") }
-        if names.isEmpty { return [] }
-        var out = [UInt8](repeating: 0, count: 2); out.put(UInt16(names.count), at: 0)
-        for name in names { try Self.validateName(name); let b = Array(name.utf8); out += [0,0,UInt8(b.count)] + b }
+    func encode(delimited: Bool = false) throws -> [UInt8] {
+        guard components.count <= 1024 else { throw KDXError.invalid("Path is too deep.") }
+        if components.isEmpty { return delimited ? [0,0] : [] }
+        var out = [UInt8](repeating: 0, count: 2); out.put(UInt16(components.count), at: 0)
+        for bytes in components { try Self.validateBytes(bytes); out += [0,0,UInt8(bytes.count)] + bytes }
         return out
     }
     init(wire b: [UInt8]) throws {
-        if b.isEmpty { names = []; return }
-        try b.require(2); let count = Int(b.u16(0))
-        guard count > 0, count <= 1024 else { throw KDXError.invalid("Invalid path depth.") }
-        var at = 2, names = [String]()
+        if b.isEmpty { components = []; return }
+        let (path, used) = try Self.decodeDelimited(b)
+        guard !path.components.isEmpty, used == b.count else { throw KDXError.invalid("Invalid file path.") }
+        self = path
+    }
+    static func decodeDelimited(_ b: [UInt8], at start: Int = 0) throws -> (Self, Int) {
+        try b.require(start+2); let count = Int(b.u16(start))
+        guard count <= 1024 else { throw KDXError.invalid("Invalid path depth.") }
+        var at = start+2, components = [[UInt8]]()
         for _ in 0..<count {
             try b.require(at+3); let length = Int(b[at+2]); try b.require(at+3+length)
-            guard let name = String(bytes: b[at+3..<at+3+length], encoding: .utf8) else { throw KDXError.invalid("Invalid file name encoding.") }
-            try Self.validateName(name); names.append(name); at += 3+length
+            let bytes = Array(b[at+3..<at+3+length]); try Self.validateBytes(bytes)
+            components.append(bytes); at += 3+length
         }
-        guard at == b.count else { throw KDXError.invalid("Unexpected bytes after path.") }
-        self.names = names
+        return (Self(components: components), at-start)
+    }
+    /// macOS filesystem calls require valid UTF-8; never substitute a different name.
+    func localNames() throws -> [String] {
+        try components.map { bytes in
+            guard let name = String(bytes: bytes, encoding: .utf8) else { throw KDXError.invalid("Invalid local file name encoding.") }
+            try Self.validateName(name); return name
+        }
     }
 }
 
@@ -156,5 +177,80 @@ final class PendingUpload {
         // linkat fails when the destination exists: never overwrite a shared file.
         guard linkat(parent, temporary, parent, name, 0) == 0 else { throw KDXError.remote(errno == EEXIST ? 0x1000d : 0x10014) }
         unlinkat(parent, temporary, 0)
+    }
+}
+
+extension SharedFiles {
+    func createFolder(parent names: [String], name: String) throws {
+        try RemotePath.validateName(name)
+        let parent = try directory(names); defer { Darwin.close(parent) }
+        guard mkdirat(parent, name, 0o755) == 0 else { throw KDXError.remote(errno == EEXIST ? 0x1000d : 0x10014) }
+    }
+    private func requireItem(parent: Int32, name: String) throws {
+        try RemotePath.validateName(name)
+        var info = stat()
+        guard fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
+              [S_IFDIR,S_IFREG].contains(info.st_mode & S_IFMT) else { throw KDXError.remote(0x10014) }
+    }
+    func move(source: [String], destination: [String], names: [String]) throws {
+        let from = try directory(source); defer { Darwin.close(from) }
+        let to = try directory(destination); defer { Darwin.close(to) }
+        guard source != destination else { return }
+        for name in names {
+            try requireItem(parent: from, name: name)
+            var info = stat()
+            guard fstatat(to, name, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT,
+                  !destination.starts(with: source+[name]) else { throw KDXError.remote(0x10014) }
+        }
+        for name in names {
+            guard renameatx_np(from, name, to, name, UInt32(RENAME_EXCL)) == 0 else { throw KDXError.remote(errno == EEXIST ? 0x1000d : 0x10014) }
+        }
+    }
+    func rename(_ path: [String], to name: String) throws {
+        guard let original = path.last else { throw KDXError.remote(0x10014) }
+        try RemotePath.validateName(name)
+        let parent = try directory(Array(path.dropLast())); defer { Darwin.close(parent) }
+        try requireItem(parent: parent, name: original)
+        if original == name { return }
+        guard renameatx_np(parent, original, parent, name, UInt32(RENAME_EXCL)) == 0 else { throw KDXError.remote(errno == EEXIST ? 0x1000d : 0x10014) }
+    }
+    private func trashDirectory() throws -> Int32 {
+        if mkdirat(root, ".kdx-trash", 0o700) != 0 && errno != EEXIST { throw POSIXError(.EIO) }
+        let fd = openat(root, ".kdx-trash", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw KDXError.remote(0x10014) }; return fd
+    }
+    func trash(folder: [String], names: [String]) throws {
+        let parent = try directory(folder); defer { Darwin.close(parent) }
+        let trash = try trashDirectory(); defer { Darwin.close(trash) }
+        for name in names { try requireItem(parent: parent, name: name) }
+        for name in names {
+            guard renameatx_np(parent, name, trash, UUID().uuidString, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+    }
+    func emptyTrash() throws {
+        let fd = try trashDirectory(); defer { Darwin.close(fd) }
+        try Self.removeContents(fd, depth: 0)
+    }
+    private static func removeContents(_ fd: Int32, depth: Int) throws {
+        guard depth < 256 else { throw KDXError.invalid("Trash nesting exceeds the limit.") }
+        let copy = dup(fd); guard copy >= 0 else { throw POSIXError(.EIO) }
+        guard let dir = fdopendir(copy) else { Darwin.close(copy); throw POSIXError(.EIO) }; defer { closedir(dir) }
+        while let entry = readdir(dir) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN)+1) { String(cString: $0) } }
+            if name == "." || name == ".." { continue }
+            var info = stat(); guard fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { throw POSIXError(.EIO) }
+            let isDirectory = info.st_mode & S_IFMT == S_IFDIR
+            if isDirectory {
+                let child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard child >= 0 else { throw KDXError.remote(0x10014) }
+                do { try removeContents(child, depth: depth+1); Darwin.close(child) } catch { Darwin.close(child); throw error }
+            }
+            guard unlinkat(fd, name, isDirectory ? AT_REMOVEDIR : 0) == 0 else { throw POSIXError(.EIO) }
+        }
+    }
+    func volumeInformation() throws -> VolumeInformation {
+        var info = statfs(); guard fstatfs(root, &info) == 0 else { throw POSIXError(.EIO) }
+        let format = withUnsafePointer(to: &info.f_fstypename) { $0.withMemoryRebound(to: CChar.self, capacity: 16) { String(cString: $0) } }
+        return VolumeInformation(totalSize: UInt64(info.f_blocks)*UInt64(info.f_bsize), freeSpace: UInt64(info.f_bavail)*UInt64(info.f_bsize), name: "Shared Files", format: format)
     }
 }

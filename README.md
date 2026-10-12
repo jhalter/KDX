@@ -11,7 +11,8 @@ same Swift protocol implementation. No external package dependencies.
 ## Status
 
 The client supports tracker browsing, multiple server connections, chat, private
-messages, file browsing, and resumable uploads and downloads. Local builds bundle
+messages, file browsing, folder access, file operations, catalog/search, and
+resumable uploads and downloads. Local builds bundle
 all 16 original appearances, with Mach Lavender selected by default.
 
 Compatibility is incomplete. News and advanced remote administration have core
@@ -19,7 +20,8 @@ and server support but still need client views. Visual fidelity and full
 interoperability with legacy peers remain unverified. KDX preserves its historical
 SHA-1/Twofish protocol and does not provide modern authenticated transport security.
 
-See the [implementation status](docs/STATUS.md) for supported features and remaining
+See the [October protocol update](docs/UPSTREAM-UPDATE.md) for the latest changes,
+the [implementation status](docs/STATUS.md) for supported features and remaining
 work, and the [interoperability checklist](docs/INTEROPERABILITY.md) for verification
 limits.
 
@@ -106,7 +108,7 @@ notarized distribution releases.
 
 Protocol work and captured fixtures derive from
 [scottanderson/kdx](https://github.com/scottanderson/kdx), pinned to
-`9807f42efeb565df8b92741074fdcd625bb24d16`; see its
+`b9777a3f6c95fb1c20845958efaab05e75bcec33`; see its
 [MIT notice](Notices/KDX-MIT.txt). The Swift Twofish implementation adapts
 RustCrypto's algorithm; see its [MIT notice](Notices/RustCrypto-MIT.txt).
 Both notices are included in app bundles.

@@ -12,13 +12,15 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
     public var port: UInt16 = 10700
     public var tracker = TrackerAdvertisementSettings()
     public var allowGuests = true
+    var accessVersion = 1
     public var accounts: [ServerAccount] = []
     public var accountClasses: [AccountClass] = AccountClass.defaults
+    public var folderAccess: [FolderAccess] = FolderAccess.defaults
     public var chats: [ChatRecord] = [.publicChat]
     public var sharedFolder = ""
     public var newsFile = ""
     public init() {}
-    private enum CodingKeys: String, CodingKey { case name, description, greeting, greetingEnabled, downloadLimit, settingsBlob, port, tracker, allowGuests, accounts, accountClasses, chats, sharedFolder, newsFile }
+    private enum CodingKeys: String, CodingKey { case accessVersion, name, description, greeting, greetingEnabled, downloadLimit, settingsBlob, port, tracker, allowGuests, accounts, accountClasses, folderAccess, chats, sharedFolder, newsFile }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name); description = try c.decode(String.self, forKey: .description)
@@ -30,6 +32,19 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
         port = try c.decode(UInt16.self, forKey: .port); allowGuests = try c.decode(Bool.self, forKey: .allowGuests)
         accounts = try c.decode([ServerAccount].self, forKey: .accounts)
         accountClasses = try c.decodeIfPresent([AccountClass].self, forKey: .accountClasses) ?? AccountClass.defaults
+        if try c.decodeIfPresent(Int.self, forKey: .accessVersion) == nil {
+            // Older releases never enforced Can Login and omitted it from every default class.
+            for index in accountClasses.indices {
+                let fileBits = [13,16,17,18,22,27,28]
+                var oldAdministrator = AccountClass.defaults[0].privileges
+                for bit in fileBits+[4] { oldAdministrator.set(bit, false) }
+                if accountClasses[index].id == 0, accountClasses[index].privileges == oldAdministrator {
+                    for bit in fileBits { accountClasses[index].privileges.set(bit, true) }
+                }
+                accountClasses[index].privileges.set(4, true)
+            }
+        }
+        folderAccess = try c.decodeIfPresent([FolderAccess].self, forKey: .folderAccess) ?? FolderAccess.defaults
         chats = try c.decodeIfPresent([ChatRecord].self, forKey: .chats) ?? [.publicChat]
         sharedFolder = try c.decodeIfPresent(String.self, forKey: .sharedFolder) ?? ""
         newsFile = try c.decodeIfPresent(String.self, forKey: .newsFile) ?? ""
@@ -63,6 +78,8 @@ public struct ServerConfiguration: Codable, Equatable, Sendable {
             guard chat.id != 0, !chat.name.isEmpty, chat.flags == 0, chat.key == 0 else { throw KDXError.invalid("Invalid chat configuration.") }
             _ = try chat.encode()
         }
+        guard folderAccess.count <= 256, Set(folderAccess.map(\.name)).count == folderAccess.count, folderAccess.contains(where: { $0.name == "[Default]" }) else { throw KDXError.invalid("Invalid folder access configuration.") }
+        for entry in folderAccess { try entry.validate() }
         for entry in accountClasses { _ = try entry.encode(info: true) }
         for account in accounts {
             try ServerAccount.validateLogin(account.login)
@@ -88,12 +105,20 @@ public struct ServerLog: Identifiable, Sendable {
     private var listener: NWListener?
     private var startWaiter: CheckedContinuation<Void, Error>?
     private var peers: [UUID: Peer] = [:]
+    private var connectionFlood: [String: ConnectionFloodWindow] = [:]
+    private var requestBans: [String: TimeInterval] = [:]
     public private(set) var configuration = ServerConfiguration()
     private var configurationURL: URL?
     private var news = NewsStore()
     private var newsLoaded = false
     private var privateChats: [UInt32: (room: ChatRecord, owner: UInt32)] = [:]
     private var activeDownloads: Set<ObjectIdentifier> = []
+    private var monitoredTransfers: [ObjectIdentifier: MonitoredConnection] = [:]
+    private var nextTransferID: UInt32 = 1
+    private var catalog: [FileSearchResult]?
+    private var catalogTask: Task<Void, Never>?
+    private var catalogOwner: UUID?
+    private var catalogToken = UUID()
     private let downloadLimiter = DownloadLimiter()
     private var nextInvitation: UInt32 = 1
     private var history: [(sequence: UInt64, entry: RemoteHistoryEntry)] = []
@@ -114,6 +139,7 @@ public struct ServerLog: Identifiable, Sendable {
         var historySending = false
         var historyCursor: UInt64 = 0
         var parent: UUID?
+        var flood = RequestFloodWindow()
     }
     public init(configuration: ServerConfiguration = ServerConfiguration(), configurationURL: URL? = nil) { self.configuration = configuration; self.configurationURL = configurationURL }
     public func start(configuration: ServerConfiguration, table: ChallengeTable, configurationURL: URL? = nil) async throws {
@@ -160,10 +186,12 @@ public struct ServerLog: Identifiable, Sendable {
         }
     }
     public func stop() {
+        catalogToken = UUID(); catalogTask?.cancel(); catalogTask = nil; catalogOwner = nil; catalog = nil
         trackerAdvertiser.stop(); trackerStatus = "Advertising stopped"; lastTrackerAdvertisement = nil
         startWaiter?.resume(throwing: KDXError.disconnected); startWaiter = nil
         let old = listener; listener = nil; old?.cancel()
         for peer in peers.values { peer.wire.close() }; peers.removeAll()
+        monitoredTransfers = [:]; connectionFlood = [:]; requestBans = [:]
         users = []; chatTopics = [:]; privateChats = [:]; nextInvitation = 1; newsLoaded = false; port = nil; isRunning = false; record("Server stopped")
     }
     private func startTrackerAdvertising() {
@@ -182,6 +210,13 @@ public struct ServerLog: Identifiable, Sendable {
     public func disconnectUser(_ id: UInt32) { peers.values.first { $0.user?.id == id }?.wire.close() }
     private func record(_ text: String) { log.append(ServerLog(text: text)); if log.count > 500 { log.removeFirst() } }
     func accept(wire: WireConnection, table: ChallengeTable) {
+        let now = ProcessInfo.processInfo.systemUptime, host = wire.peerHost
+        connectionFlood = connectionFlood.filter { now < $0.value.blockedUntil || now-$0.value.started < 300 }
+        requestBans = requestBans.filter { $0.value > now }
+        var window = connectionFlood[host] ?? ConnectionFloodWindow(started: now)
+        let accepted = window.accept(now: now); connectionFlood[host] = window
+        guard accepted, peers.values.filter({ $0.wire.peerHost == host }).count < 6,
+              host == "127.0.0.1" || requestBans[host] == nil else { wire.close(); return }
         if !newsLoaded {
             do { news = try NewsStore(url: configuration.newsFile.isEmpty ? nil : URL(fileURLWithPath: configuration.newsFile)); newsLoaded = true }
             catch { lastError = error.localizedDescription; wire.close(); return }
@@ -201,7 +236,7 @@ public struct ServerLog: Identifiable, Sendable {
                 let client = try await wire.receiveHello()
                 let hello = Hello(server: true)
                 try await wire.write(hello.encode())
-                guard client.nonce != hello.nonce else { throw KDXError.authentication }
+                guard client.version == 0x10, client.nonce != hello.nonce else { throw KDXError.authentication }
                 let name = String(decoding: client.name, as: UTF8.self)
                 if client.name.first != 0 { peers[id]?.loginAttempt = name.isEmpty ? "guest" : name }
                 let account = configuration.accounts.first { $0.login == (name.isEmpty ? "guest" : name) }
@@ -212,20 +247,29 @@ public struct ServerLog: Identifiable, Sendable {
                           parent.value.wire.peerHost == wire.peerHost else { throw KDXError.authentication }
                     key = try AccountKey(bytes: parent.value.sessionKey)
                     peers[id]?.parent = parent.key; wire.ioTimeout = .seconds(30)
-                } else if let account { key = try AccountKey(bytes: account.key) }
-                else if configuration.allowGuests && (name.isEmpty || name == "guest") { key = AccountKey(password: "") }
+                } else if let account {
+                    guard account.effective(in: configuration.accountClasses).contains(4) else { throw KDXError.authentication }
+                    key = try AccountKey(bytes: account.key)
+                }
+                else if configuration.allowGuests && (name.isEmpty || name == "guest") {
+                    guard configuration.accountClasses.first(where: { $0.id == 2 })?.privileges.contains(4) == true else { throw KDXError.authentication }
+                    key = AccountKey(password: "")
+                }
                 else { throw KDXError.authentication }
                 try Proof(wire: await wire.read(44)).verify(key: key, nonce: hello.nonce, response: table.response(hello.challenge))
                 try await wire.write(Proof(key: key, nonce: client.nonce, response: table.response(client.challenge)).encode())
                 wire.cipher = SessionCipher(key: key)
                 // Recheck after the network await: an administrator may have changed/deleted this account.
                 if let account {
-                    guard let current = configuration.accounts.first(where: { $0.login == account.login }), current.key == key.bytes else { throw KDXError.authentication }
+                    guard let current = configuration.accounts.first(where: { $0.login == account.login }), current.key == key.bytes, current.effective(in: configuration.accountClasses).contains(4) else { throw KDXError.authentication }
                     var updated = current; updated.lastLogin = ServerAccount.now
                     var candidate = configuration
                     candidate.accounts[candidate.accounts.firstIndex(where: { $0.login == current.login })!] = updated
                     try commitConfiguration(candidate)
                     peers[id]?.account = updated
+                }
+                if peers[id]?.parent == nil, peers[id]?.account == nil {
+                    guard configuration.allowGuests, configuration.accountClasses.first(where: { $0.id == 2 })?.privileges.contains(4) == true else { throw KDXError.authentication }
                 }
                 peers[id]?.sessionKey = (0..<32).map { _ in UInt8.random(in: .min ... .max) }
             } catch { timeout.cancel(); throw error }
@@ -234,6 +278,7 @@ public struct ServerLog: Identifiable, Sendable {
                 let message = try await wire.receive(limit: 0x20000)
                 guard peers[id]?.wire === wire else { break }
                 guard !message.isReply else { throw KDXError.invalid("Unexpected client reply.") }
+                try await checkFlood(id: id, wire: wire)
                 let actor = peers[id]?.parent.flatMap { peers[$0] } ?? peers[id]
                 let detail = historyDetail(message)
                 do {
@@ -266,6 +311,21 @@ public struct ServerLog: Identifiable, Sendable {
             record("\(user.nickname) disconnected")
         }
         await publishHistory()
+    }
+    private func checkFlood(id: UUID, wire: WireConnection) async throws {
+        let classID = peers[id]?.account?.classID ?? peers[id]?.parent.flatMap { peers[$0]?.account?.classID } ?? 2
+        let limit = configuration.accountClasses.first(where: { $0.id == classID })?.floodLimit ?? 40
+        let action = peers[id]?.flood.record(limit: limit, now: ProcessInfo.processInfo.systemUptime) ?? .none
+        switch action {
+        case .none: return
+        case .warning, .finalWarning:
+            let text = action == .warning ? "WARNING: The server has detected that you are flooding it. If you continue to flood the server, you will be banned." : "Final warning: If you continue to flood the server, you will be banned."
+            try await wire.send(type: 155, payload: BroadcastMessage(text: text).encode(received: true))
+        case .ban:
+            requestBans[wire.peerHost] = ProcessInfo.processInfo.systemUptime+7200
+            record("Auto-banned for flooding: \(wire.peerHost)")
+            throw KDXError.remote(0x640004)
+        }
     }
     private func handle(_ message: Message, id: UUID, wire: WireConnection) async throws {
         let b = message.payload, tx = message.transaction
@@ -323,12 +383,19 @@ public struct ServerLog: Identifiable, Sendable {
         case 142:
             try requirePrivilege(40, peer: peers[id])
             guard peers[id]?.monitoringConnections == true else { throw KDXError.remote(0x10003) }
-            let entries = peers.values.compactMap { peer -> MonitoredConnection? in
-                guard let user = peer.user else { return nil }
-                return MonitoredConnection(userID: user.id, nickname: user.nickname, login: peer.account?.login ?? "guest",
-                                           accountName: peer.account?.name ?? "Guest", address: peer.wire.endpointDescription,
-                                           loginTime: peer.loginTime, lastActivity: peer.lastActivity)
-            }.sorted { $0.userID < $1.userID }
+            let now = ServerAccount.now
+            var entries = [MonitoredConnection]()
+            for peer in peers.values.sorted(by: { ($0.user?.id ?? 0) < ($1.user?.id ?? 0) }) {
+                guard let user = peer.user else { continue }
+                let classID = peer.account?.classID ?? 2
+                var entry = MonitoredConnection(userID: user.id, nickname: user.nickname, login: peer.account?.login ?? "guest",
+                    accountClassName: configuration.accountClasses.first(where: { $0.id == classID })?.name ?? "?",
+                    address: peer.wire.endpointDescription, loginTime: peer.loginTime, serverTime: now)
+                entry.classID = classID; entries.append(entry)
+                for var transfer in monitoredTransfers.values.filter({ $0.userID == user.id }).sorted(by: { $0.transferID < $1.transferID }) {
+                    transfer.serverTime = now; entries.append(transfer)
+                }
+            }
             try await wire.send(type: 143, payload: MonitoredConnection.encodeList(entries), transaction: tx, reply: true)
         case 180:
             try requirePrivilege(63, peer: peers[id])
@@ -398,12 +465,23 @@ public struct ServerLog: Identifiable, Sendable {
         case 600...612:
             try await handleNews(message, id: id, wire: wire)
         case 400:
-            let files = try SharedFiles(path: configuration.sharedFolder).list(RemotePath(wire: b).names)
+            let path = try RemotePath(wire: b)
+            let files = try fileList(path, peer: peers[id])
             try await wire.send(type: 401, payload: RemoteFile.encodeList(files), transaction: tx, reply: true)
         case 409:
-            try requirePrivilege(20, peer: peers[id])
+            let path = try RemotePath(wire: b)
+            try requireFileAccess(path.parent, bit: 1, peer: peers[id])
+            guard privileges(for: peers[id]).contains(17) || privileges(for: peers[id]).contains(20) else { throw KDXError.remote(0x10014) }
             let files = try SharedFiles(path: configuration.sharedFolder)
-            try await wire.send(type: 410, payload: files.information(RemotePath(wire: b).names).encode(), transaction: tx, reply: true)
+            if path.components.isEmpty && privileges(for: peers[id]).contains(22) {
+                try await wire.send(type: 422, payload: files.volumeInformation().encode(), transaction: tx, reply: true)
+            } else {
+                let info = try files.information(path.localNames())
+                if info.isDirectory { try requireFileAccess(path, bit: 0, peer: peers[id]) }
+                try await wire.send(type: 410, payload: info.encode(), transaction: tx, reply: true)
+            }
+        case 402,403,405,407,411,421,423,450,452,1100...1107:
+            try await handleFileOperation(message, id: id, wire: wire)
         case 200...220:
             try await handleChat(message, id: id, wire: wire)
         case 300:
@@ -417,9 +495,10 @@ public struct ServerLog: Identifiable, Sendable {
     private func handleTransfer(_ message: Message, wire: WireConnection, parent: Peer) async throws {
         let b = message.payload, tx = message.transaction
         let files = try SharedFiles(path: configuration.sharedFolder)
+        defer { monitoredTransfers.removeValue(forKey: ObjectIdentifier(wire)) }
         switch message.type {
         case 400:
-            try await wire.send(type: 401, payload: RemoteFile.encodeList(files.list(RemotePath(wire: b).names)), transaction: tx, reply: true)
+            try await wire.send(type: 401, payload: RemoteFile.encodeList(fileList(RemotePath(wire: b), peer: parent)), transaction: tx, reply: true)
         case 412:
             activeDownloads.insert(ObjectIdentifier(wire))
             defer { activeDownloads.remove(ObjectIdentifier(wire)) }
@@ -427,7 +506,8 @@ public struct ServerLog: Identifiable, Sendable {
             let request = try DownloadRequest(wire: b)
             guard request.options == 0 else { throw KDXError.remote(0x10004) }
             let path = request.path
-            let (handle, size) = try files.openFile(path.names)
+            try requireFileAccess(path.parent, bit: 2, peer: parent)
+            let (handle, size) = try files.openFile(path.localNames())
             defer { try? handle.close() }
             let offset = request.alignedOffset(size: size), resourceSize = try ResourceFork.size(handle.fileDescriptor)
             let resourceOffset = DownloadRequest.alignedOffset(request.resourceOffset, size: resourceSize)
@@ -439,32 +519,54 @@ public struct ServerLog: Identifiable, Sendable {
             guard fstat(handle.fileDescriptor, &attributes) == 0 else { throw POSIXError(.EIO) }
             info.created = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_birthtimespec.tv_sec) + Double(attributes.st_birthtimespec.tv_nsec)/1_000_000_000))
             info.modified = KDXTime.encode(Date(timeIntervalSince1970: Double(attributes.st_mtimespec.tv_sec) + Double(attributes.st_mtimespec.tv_nsec)/1_000_000_000))
+            beginMonitoring(wire: wire, parent: parent, path: path, total: size+resourceSize, done: offset+resourceOffset, state: 412)
             try await wire.send(type: 413, payload: info.encode(), transaction: tx, reply: true)
             if configuration.downloadLimit > 0 { try await parent.wire.send(type: 419, payload: configuration.downloadLimit.beBytes) }
             try handle.seek(toOffset: offset)
-            try await wire.sendFile(type: 414, length: UInt32(size-offset), source: handle, transaction: tx, reply: true, limiter: downloadLimiter)
-            try await wire.sendFile(type: 414, length: UInt32(resourceSize-resourceOffset), source: handle, resourceOffset: resourceOffset, limiter: downloadLimiter)
+            try await wire.sendFile(type: 414, length: UInt32(size-offset), source: handle, transaction: tx, reply: true, limiter: downloadLimiter) { self.updateMonitoring(wire, done: offset+resourceOffset+$0, initial: offset+resourceOffset) }
+            try await wire.sendFile(type: 414, length: UInt32(resourceSize-resourceOffset), source: handle, resourceOffset: resourceOffset, limiter: downloadLimiter) { self.updateMonitoring(wire, done: size+resourceOffset+$0, initial: offset+resourceOffset) }
             appendHistory(kind: 188, peer: parent, detail: path.names.joined(separator: "/"))
             record("Downloaded \(path.names.joined(separator: "/"))")
         case 415:
             try requirePrivilege(11, peer: parent)
             let request = try UploadRequest(wire: b)
             guard request.options == 0, request.resourceSize <= UInt32.max, request.dataSize <= UInt32.max else { throw KDXError.remote(0x10004) }
+            try requireFileAccess(request.folder, bit: 3, peer: parent)
             // Anonymous sessions cannot resume one another's files.
             let owner = parent.account.map { $0.login + ":" + Data($0.key).base64EncodedString() }
             let upload = try PartialUpload(files: files, request: request, owner: owner)
             try await wire.send(type: 416, payload: UploadReply(dataOffset: upload.reportedOffset).encode(), transaction: tx, reply: true)
+            beginMonitoring(wire: wire, parent: parent, path: request.folder.appending(RemoteFile(name: request.strings[0], size: request.dataSize, isDirectory: false, modified: Date())), total: request.dataSize+request.resourceSize, done: upload.offset, state: 415)
             let remaining = request.dataSize - upload.offset
-            let length = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: remaining)
+            let length = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: remaining) { self.updateMonitoring(wire, done: upload.offset+$0, initial: upload.offset) }
             guard length == remaining else { throw KDXError.remote(0x40074) }
-            let resourceLength = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: request.resourceSize, resourceOffset: 0)
+            let resourceLength = try await wire.receiveFile(type: 417, sink: upload.handle, maximum: request.resourceSize, resourceOffset: 0) { self.updateMonitoring(wire, done: request.dataSize+$0, initial: upload.offset) }
             guard resourceLength == request.resourceSize else { throw KDXError.remote(0x40074) }
-            try upload.commit()
+            try upload.commit(); invalidateCatalog()
             try await wire.send(type: 418)
             appendHistory(kind: 189, peer: parent, detail: request.strings[0])
             record("Uploaded \(request.strings[0])")
         default: throw KDXError.remote(0x10004)
         }
+    }
+    private func beginMonitoring(wire: WireConnection, parent: Peer, path: RemotePath, total: UInt64, done: UInt64, state: UInt32) {
+        let classID = parent.account?.classID ?? 2
+        var entry = MonitoredConnection(userID: parent.user?.id ?? 0, nickname: parent.user?.nickname ?? "", login: parent.account?.login ?? "guest",
+            accountClassName: configuration.accountClasses.first(where: { $0.id == classID })?.name ?? "?", address: wire.endpointDescription,
+            loginTime: ServerAccount.now, serverTime: ServerAccount.now, path: path)
+        entry.transferID = nextTransferID; nextTransferID = nextTransferID == .max ? 1 : nextTransferID+1
+        entry.classID = classID; entry.bytesDone = done; entry.totalBytes = total; entry.state = state
+        entry.speedLimit = state == 412 ? configuration.downloadLimit : 0
+        monitoredTransfers[ObjectIdentifier(wire)] = entry
+    }
+    private func updateMonitoring(_ wire: WireConnection, done: UInt64, initial: UInt64) {
+        let key = ObjectIdentifier(wire)
+        guard var entry = monitoredTransfers[key] else { return }
+        entry.bytesDone = done
+        let elapsed = max(1, ServerAccount.now-entry.loginTime)
+        entry.rate = UInt32(clamping: (done-initial)*1000/elapsed)
+        entry.secondsLeft = entry.rate == 0 ? 0 : UInt32(clamping: (entry.totalBytes-done)/UInt64(entry.rate))
+        monitoredTransfers[key] = entry
     }
     private func appendHistory(kind: UInt32, peer: Peer? = nil, detail: String = "") {
         // Keep UTF-8 fields in their one-byte wire bounds without retaining message/password bodies.
@@ -482,7 +584,7 @@ public struct ServerLog: Identifiable, Sendable {
         let b = message.payload
         switch message.type {
         case 201,202,204,209,211: return b.count >= 4 ? (try? chatRecord(b.u32(0)).name) ?? "" : ""
-        case 400,409: return (try? RemotePath(wire: b).names.joined(separator: "/")) ?? ""
+        case 400,409: return (try? RemotePath(wire: b).localNames().joined(separator: "/")) ?? ""
         case 412: return (try? DownloadRequest(wire: b).path.names.joined(separator: "/")) ?? ""
         case 415: return (try? UploadRequest(wire: b).strings[0]) ?? ""
         default: return ""
@@ -550,7 +652,7 @@ extension KDXServer {
             var entry = try AccountClass.decode(b, info: true).0
             guard !entry.name.isEmpty, let index = configuration.accountClasses.firstIndex(where: { $0.id == entry.id }) else { throw KDXError.remote(0x10002) }
             try validateGrant(entry.privileges, requester: requester)
-            entry.time = ServerAccount.now
+            entry.time = ServerAccount.now; entry.editor = requester?.account?.login ?? "guest"
             var candidate = configuration; candidate.accountClasses[index] = entry
             try commitConfiguration(candidate)
             let changed = peers.keys.filter { peers[$0]?.parent == nil && (peers[$0]?.account?.classID ?? 2) == entry.id }
@@ -613,6 +715,7 @@ extension KDXServer {
         for peerID in changed {
             let oldRooms = peers[peerID]?.joined ?? []
             let effective = privileges(for: peers[peerID]), classID = peers[peerID]?.account?.classID ?? 2
+            if !effective.contains(4) { peers[peerID]?.wire.close(); continue }
             if !effective.contains(40) { peers[peerID]?.monitoringConnections = false }
             if !effective.contains(30) { peers[peerID]?.joined = [] }
             else { peers[peerID]?.joined = Set(oldRooms.filter { room in
@@ -829,6 +932,168 @@ extension KDXServer {
             try news.delete(groupID: group.id, id: b.u32(4), login: peer.account?.login ?? "guest", admin: access.contains(72))
             await broadcast(type: 614, payload: [group.id, b.u32(4), UInt32(try news.group(group.id).messageCount)].flatMap(\.beBytes))
         default: throw KDXError.remote(0x10004)
+        }
+    }
+}
+
+extension KDXServer {
+    private func accessItem(_ path: RemotePath) -> (FolderAccess, String?) {
+        for name in path.names.reversed() {
+            if let tag = FolderAccess.tag(in: name), let item = configuration.folderAccess.first(where: { $0.name == tag.tag }) { return (item, tag.owner) }
+        }
+        return (configuration.folderAccess.first { $0.name == "[Default]" } ?? FolderAccess.defaults[0], nil)
+    }
+    private func requireFileAccess(_ path: RemotePath, bit: Int, peer: Peer?) throws {
+        if privileges(for: peer).contains(0) { return }
+        let classID = peer?.account?.classID ?? 2, login = peer?.account?.login ?? "guest"
+        for count in 0...path.components.count {
+            let (item, owner) = accessItem(path.prefix(count))
+            guard item.permits(0, classID: classID, login: login, folderOwner: owner) else { throw KDXError.remote(0x10014) }
+        }
+        let (item, owner) = accessItem(path)
+        guard item.permits(bit, classID: classID, login: login, folderOwner: owner) else { throw KDXError.remote(0x10014) }
+    }
+    private func fileList(_ path: RemotePath, peer: Peer?) throws -> [RemoteFile] {
+        try requireFileAccess(path, bit: 1, peer: peer)
+        return try SharedFiles(path: configuration.sharedFolder).list(path.localNames()).compactMap { file in
+            if file.isDirectory, (try? requireFileAccess(path.appending(file), bit: 0, peer: peer)) == nil { return nil }
+            var file = file
+            if file.isDirectory {
+                var header = file.header ?? [UInt8](repeating: 0, count: 56)
+                header.put(UInt32(0x01000002), at: 32); header.put(UInt16(0xffff), at: 46)
+                header.put(UInt16(clamping: accessItem(path.appending(file)).0.icon), at: 48); file.header = header
+            }
+            return file
+        }
+    }
+    private func handleFileOperation(_ message: Message, id: UUID, wire: WireConnection) async throws {
+        let b = message.payload, tx = message.transaction, peer = peers[id]
+        func success() async throws { try await wire.send(type: 1, payload: UInt32(0).beBytes+message.type.beBytes, transaction: tx, reply: true) }
+        switch message.type {
+        case 1106:
+            guard privileges(for: peer).contains(27) else {
+                if b.count >= 4 && b[0]&1 != 0 { return }; throw KDXError.remote(0x10014)
+            }
+            let entries = configuration.folderAccess.map { FolderAccessSummary(name: $0.name, description: $0.description, flags: $0.flags, icon: $0.icon) }
+            try await wire.send(type: 1107, payload: FolderAccessSummary.encodeList(entries), transaction: tx, reply: true)
+        case 1103:
+            try requirePrivilege(27, peer: peer)
+            guard let item = configuration.folderAccess.first(where: { Array($0.name.utf8) == b }) else { throw KDXError.remote(0x1000c) }
+            try await wire.send(type: 1104, payload: item.encode(), transaction: tx, reply: true)
+        case 1100,1105:
+            try requirePrivilege(28, peer: peer)
+            let item = try FolderAccess.decode(b); try item.validate()
+            var candidate = configuration
+            if message.type == 1100 {
+                guard !candidate.folderAccess.contains(where: { $0.name == item.name }) else { throw KDXError.remote(0x1000d) }
+                guard item.flags&1 == 0 else { throw KDXError.remote(0x10014) }
+                candidate.folderAccess.append(item)
+            } else {
+                guard let index = candidate.folderAccess.firstIndex(where: { $0.name == item.currentName }) else { throw KDXError.remote(0x1000c) }
+                let old = candidate.folderAccess[index]
+                guard old.name != "[Default]" || (item.name == old.name && item.flags&1 != 0),
+                      !candidate.folderAccess.enumerated().contains(where: { $0.offset != index && $0.element.name == item.name }) else { throw KDXError.remote(0x10014) }
+                candidate.folderAccess[index] = item
+            }
+            try commitConfiguration(candidate)
+            for transfer in peers.values where transfer.parent != nil { transfer.wire.close() }
+            try await success()
+        case 1101:
+            try requirePrivilege(28, peer: peer)
+            guard let item = configuration.folderAccess.first(where: { Array($0.name.utf8) == b }) else { throw KDXError.remote(0x1000c) }
+            guard item.flags&1 == 0, item.name != "[Default]" else { throw KDXError.remote(0x10014) }
+            var candidate = configuration; candidate.folderAccess.removeAll { $0.name == item.name }; try commitConfiguration(candidate)
+            for transfer in peers.values where transfer.parent != nil { transfer.wire.close() }
+            try await wire.send(type: 1102, payload: b)
+        case 402:
+            try requirePrivilege(11, peer: peer)
+            let request = try CreateFolderRequest.decode(b)
+            let parent = request.name.isEmpty ? request.path.parent : request.path
+            var name = request.name.isEmpty ? request.path.names.last ?? "" : request.name
+            try requireFileAccess(parent, bit: 4, peer: peer)
+            if !request.access.isEmpty || !request.owner.isEmpty || FolderAccess.tag(in: name) != nil {
+                try requirePrivilege(28, peer: peer)
+                if !request.access.isEmpty {
+                    guard configuration.folderAccess.contains(where: { $0.name == request.access }), !request.owner.contains(where: { "[],/".contains($0) }) else { throw KDXError.remote(0x1001e) }
+                    name += " ["+request.access+(request.owner.isEmpty ? "" : ","+request.owner)+"]"
+                }
+            }
+            guard !(name as NSString).pathExtension.lowercased().elementsEqual("lnk") else { throw KDXError.remote(0x30076) }
+            try SharedFiles(path: configuration.sharedFolder).createFolder(parent: parent.localNames(), name: name); invalidateCatalog(); try await success()
+        case 407:
+            try requirePrivilege(16, peer: peer)
+            let request = try MoveItemsRequest.decode(b)
+            try requireFileAccess(request.source, bit: 6, peer: peer); try requireFileAccess(request.destination, bit: 5, peer: peer)
+            for component in request.items.components { try requireFileAccess(RemotePath(components: request.source.components+[component]), bit: 6, peer: peer) }
+            try SharedFiles(path: configuration.sharedFolder).move(source: request.source.localNames(), destination: request.destination.localNames(), names: request.items.localNames())
+            invalidateCatalog(); try await success()
+        case 405:
+            try requirePrivilege(18, peer: peer)
+            let request = try TrashItemsRequest.decode(b); try requireFileAccess(request.folder, bit: 11, peer: peer)
+            for component in request.items.components { try requireFileAccess(RemotePath(components: request.folder.components+[component]), bit: 11, peer: peer) }
+            try SharedFiles(path: configuration.sharedFolder).trash(folder: request.folder.localNames(), names: request.items.localNames()); invalidateCatalog(); try await success()
+        case 411:
+            let request = try SetFileInfoRequest.decode(b)
+            guard request.flags == 1 else { throw KDXError.remote(0x10004) }
+            try requirePrivilege(17, peer: peer); try requireFileAccess(request.path.parent, bit: 12, peer: peer); try requireFileAccess(request.path, bit: 12, peer: peer)
+            guard let name = String(bytes: request.name, encoding: .utf8) else { throw KDXError.remote(0x1000a) }
+            if !privileges(for: peer).contains(28) {
+                let old = FolderAccess.tag(in: request.path.names.last ?? ""), new = FolderAccess.tag(in: name)
+                guard old?.tag == new?.tag, old?.owner == new?.owner else { throw KDXError.remote(0x10014) }
+            }
+            try SharedFiles(path: configuration.sharedFolder).rename(request.path.localNames(), to: name); invalidateCatalog()
+            // No success reply for 411. Errors still use Status for diagnostics.
+        case 421:
+            try requirePrivilege(13, peer: peer); try SharedFiles(path: configuration.sharedFolder).emptyTrash(); try await success()
+        case 423:
+            try requirePrivilege(22, peer: peer); throw KDXError.remote(0x10005) // Shared volume is read-only metadata.
+        case 450:
+            try requirePrivilege(61, peer: peer)
+            guard b.isEmpty || b.count == 4 else { throw KDXError.remote(0x1000a) }
+            if b.count == 4, b.u32(0)&1 != 0 {
+                guard catalogOwner == id else { throw KDXError.remote(0x10014) }
+                catalogTask?.cancel(); return
+            }
+            guard catalogTask == nil else { throw KDXError.remote(0x30075) }
+            catalogOwner = id; catalogToken = UUID(); let token = catalogToken
+            catalogTask = Task { [weak self] in await self?.buildCatalog(id: id, wire: wire, token: token) }
+        case 452:
+            try b.require(88); let length = Int(b[84]); try b.require(88+length)
+            guard length >= 3, let catalog else { throw KDXError.remote(length < 3 ? 0x1000a : 0x640001) }
+            let query = b.text(88..<88+length)
+            let files = try SharedFiles(path: configuration.sharedFolder)
+            let results = catalog.lazy.filter { entry in
+                entry.file.name.localizedCaseInsensitiveContains(query) && (try? self.requireFileAccess(entry.file.isDirectory ? entry.path : entry.path.parent, bit: 1, peer: peer)) != nil && (try? files.information(entry.path.localNames())) != nil
+            }.prefix(100)
+            try await wire.send(type: 453, payload: FileSearchResult.encodeList(Array(results)), transaction: tx, reply: true)
+        default: throw KDXError.remote(0x10004)
+        }
+    }
+    private func invalidateCatalog() { catalog = nil; catalogTask?.cancel() }
+    private func buildCatalog(id: UUID, wire: WireConnection, token: UUID) async {
+        defer { if catalogToken == token { catalogTask = nil; catalogOwner = nil } }
+        do {
+            let files = try SharedFiles(path: configuration.sharedFolder)
+            var pending = [RemotePath([])], results = [FileSearchResult](), sentAt = ContinuousClock.now
+            while let path = pending.popLast() {
+                try Task.checkCancellation(); try requirePrivilege(61, peer: peers[id]); guard catalogToken == token, peers[id]?.wire === wire else { throw KDXError.disconnected }
+                guard path.components.count < 256 else { throw KDXError.invalid("Catalog nesting exceeds limit.") }
+                for file in try files.list(path.localNames()) {
+                    let child = path.appending(file); results.append(FileSearchResult(path: child, file: file))
+                    if file.isDirectory { pending.append(child) }
+                    guard results.count <= 100000 else { throw KDXError.invalid("Catalog exceeds 100,000 items.") }
+                }
+                if sentAt.duration(to: .now) >= .seconds(2) {
+                    try await wire.send(type: 451, payload: CatalogProgress(complete: false, count: UInt32(results.count)).encode()); sentAt = .now
+                }
+                await Task.yield()
+            }
+            try Task.checkCancellation(); try requirePrivilege(61, peer: peers[id])
+            guard catalogToken == token, peers[id]?.wire === wire else { return }
+            catalog = results
+            try await wire.send(type: 451, payload: CatalogProgress(complete: true, count: UInt32(results.count)).encode())
+        } catch is CancellationError { } catch {
+            _ = try? await wire.send(type: 1, payload: [UInt32(0x10004),450,0,0,0,0].flatMap(\.beBytes))
         }
     }
 }

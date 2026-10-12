@@ -61,10 +61,13 @@ public struct NewsPost: Codable, Identifiable, Sendable {
 final class NewsStore {
     private(set) var posts: [NewsPost] = []
     private(set) var groups: [NewsGroupInfo] = [.general]
+    struct Archive: Codable { var groupID: UInt32; var name: String; var posts: [NewsPost] }
+    private(set) var archives: [Archive] = []
     private let url: URL?
     private var nextGroupID: UInt32 = 2
     private var nextMessageIDs: [String: UInt32] = ["1": 1]
     private struct Saved: Codable {
+        var archives: [Archive]?
         var nextID: UInt32
         var posts: [NewsPost]
         var groups: [NewsGroupInfo]?
@@ -76,6 +79,7 @@ final class NewsStore {
         self.url = url
         if let url, FileManager.default.fileExists(atPath: url.path) {
             let saved = try JSONDecoder().decode(Saved.self, from: Data(contentsOf: url))
+            archives = saved.archives ?? []
             posts = saved.posts; groups = saved.groups ?? [.general]
             nextGroupID = saved.nextGroupID ?? 2
             nextMessageIDs = saved.nextMessageIDs ?? ["1": saved.nextID]
@@ -85,7 +89,18 @@ final class NewsStore {
                 groups[0].sizeLimitKiB = UInt16(max(50, (size+1023)/1024))
                 groups[0].time = posts.map { KDXTime.encode($0.date) }.max() ?? 0
             }
-            try validate(groups: groups, posts: posts, nextGroupID: nextGroupID, nextMessages: nextMessageIDs)
+            let originalGroups = groups
+            // Migrate old storage budgets without discarding any post.
+            for index in groups.indices { groups[index].sizeLimitKiB = min(1024, max(4, groups[index].sizeLimitKiB)) }
+            try validate(groups: groups, posts: posts, nextGroupID: nextGroupID, nextMessages: nextMessageIDs, checkBudget: false)
+            var migrated = posts
+            var archived = archives
+            for group in groups { let split = try partition(migrated, group: group, archives: archived); migrated = split.posts; archived = split.archives }
+            try validate(groups: groups, posts: migrated, nextGroupID: nextGroupID, nextMessages: nextMessageIDs)
+            if originalGroups != groups || migrated.count != posts.count || saved.groups == nil {
+                try persist(groups: groups, posts: migrated, nextGroupID: nextGroupID, nextMessages: nextMessageIDs, archives: archived)
+            }
+            posts = migrated; archives = archived
         }
     }
     func group(_ id: UInt32) throws -> NewsGroupInfo {
@@ -93,8 +108,9 @@ final class NewsStore {
         group.messageCount = UInt16(posts.filter { $0.groupID == id }.count); return group
     }
     func saveGroup(_ value: NewsGroupInfo, creating: Bool) throws -> NewsGroupInfo {
-        try value.validate()
-        var value = value, candidates = groups, ids = nextMessageIDs, next = nextGroupID
+        var value = value
+        value.sizeLimitKiB = min(1024, max(4, value.sizeLimitKiB)); try value.validate()
+        var candidates = groups, ids = nextMessageIDs, next = nextGroupID
         if creating {
             guard next > 0, next < UInt32.max else { throw KDXError.invalid("Newsgroup identifier limit reached.") }
             value.id = next; next += 1; value.time = 0; value.messageCount = 0
@@ -103,10 +119,10 @@ final class NewsStore {
             guard let index = candidates.firstIndex(where: { $0.id == value.id }) else { throw KDXError.remote(0x1000c) }
             value.time = candidates[index].time; value.messageCount = 0; candidates[index] = value
         }
-        // Keep recent posts within the configured serialized storage limit.
-        let retained = try trim(posts, group: value)
-        try persist(groups: candidates, posts: retained, nextGroupID: next, nextMessages: ids)
-        groups = candidates; posts = retained; nextGroupID = next; nextMessageIDs = ids
+        // Archive older posts in the same atomic transaction as the active list.
+        let split = try partition(posts, group: value, archives: archives), retained = split.posts
+        try persist(groups: candidates, posts: retained, nextGroupID: next, nextMessages: ids, archives: split.archives)
+        archives = split.archives; groups = candidates; posts = retained; nextGroupID = next; nextMessageIDs = ids
         return try group(value.id)
     }
     func deleteGroup(_ id: UInt32) throws {
@@ -122,13 +138,12 @@ final class NewsStore {
         let next = nextMessageIDs[String(groupID)] ?? 1
         guard next > 0, next < UInt32.max else { throw KDXError.invalid("News identifier limit reached.") }
         let post = NewsPost(id: next, groupID: groupID, date: Date(), author: author, login: login, subject: subject, body: body)
-        guard try post.encode().count <= Int(definition.sizeLimitKiB) * 1024 else { throw KDXError.invalid("This post exceeds the newsgroup's storage limit.") }
-        let retained = try trim(posts + [post], group: definition)
+        let split = try partition(posts + [post], group: definition, archives: archives), retained = split.posts
         var candidates = groups, ids = nextMessageIDs
         candidates[candidates.firstIndex { $0.id == groupID }!].time = KDXTime.encode(post.date)
         ids[String(groupID)] = next + 1
-        try persist(groups: candidates, posts: retained, nextGroupID: nextGroupID, nextMessages: ids)
-        groups = candidates; posts = retained; nextMessageIDs = ids; return post
+        try persist(groups: candidates, posts: retained, nextGroupID: nextGroupID, nextMessages: ids, archives: split.archives)
+        archives = split.archives; groups = candidates; posts = retained; nextMessageIDs = ids; return post
     }
     func delete(groupID: UInt32 = 1, id: UInt32, login: String, admin: Bool) throws {
         guard let post = posts.first(where: { $0.groupID == groupID && $0.id == id }) else { throw KDXError.remote(0x1000c) }
@@ -136,28 +151,33 @@ final class NewsStore {
         let result = posts.filter { $0.groupID != groupID || $0.id != id }
         try persist(groups: groups, posts: result, nextGroupID: nextGroupID, nextMessages: nextMessageIDs); posts = result
     }
-    private func trim(_ posts: [NewsPost], group: NewsGroupInfo) throws -> [NewsPost] {
+    private func partition(_ posts: [NewsPost], group: NewsGroupInfo, archives: [Archive]) throws -> (posts: [NewsPost], archives: [Archive]) {
         let inGroup = posts.filter { $0.groupID == group.id }
         let sizes = try inGroup.map { try $0.encode().count }
         var total = sizes.reduce(0,+), start = 0
-        while total > Int(group.sizeLimitKiB) * 1024 || inGroup.count - start > Int(UInt16.max) { total -= sizes[start]; start += 1 }
+        while (total > Int(group.sizeLimitKiB) * 1024 && inGroup.count-start > 1) || inGroup.count - start > Int(UInt16.max) { total -= sizes[start]; start += 1 }
         let removed = Set(inGroup.prefix(start).map(\.id))
-        return posts.filter { $0.groupID != group.id || !removed.contains($0.id) }
+        var archives = archives
+        if start > 0 {
+            if let index = archives.firstIndex(where: { $0.groupID == group.id }) { archives[index].name = group.name; archives[index].posts += inGroup.prefix(start) }
+            else { archives.append(Archive(groupID: group.id, name: group.name, posts: Array(inGroup.prefix(start)))) }
+        }
+        return (posts.filter { $0.groupID != group.id || !removed.contains($0.id) }, archives)
     }
-    private func validate(groups: [NewsGroupInfo], posts: [NewsPost], nextGroupID: UInt32, nextMessages: [String: UInt32]) throws {
+    private func validate(groups: [NewsGroupInfo], posts: [NewsPost], nextGroupID: UInt32, nextMessages: [String: UInt32], checkBudget: Bool = true) throws {
         guard groups.count <= 256, Set(groups.map(\.id)).count == groups.count, groups.allSatisfy({ $0.id > 0 && $0.id < nextGroupID }), posts.allSatisfy({ post in groups.contains { $0.id == post.groupID } }) else { throw KDXError.invalid("Invalid saved newsgroups.") }
         for group in groups {
             try group.validate()
             let members = posts.filter { $0.groupID == group.id }
             guard members.count <= Int(UInt16.max), members.allSatisfy({ $0.id > 0 }), Set(members.map(\.id)).count == members.count,
                   let next = nextMessages[String(group.id)], next > (members.map(\.id).max() ?? 0) else { throw KDXError.invalid("Invalid saved news identifiers.") }
-            guard try members.reduce(0, { try $0 + $1.encode().count }) <= Int(group.sizeLimitKiB) * 1024 else { throw KDXError.invalid("Stored news exceeds its group limit.") }
+            guard try !checkBudget || members.count <= 1 || members.reduce(0, { try $0 + $1.encode().count }) <= Int(group.sizeLimitKiB) * 1024 else { throw KDXError.invalid("Stored news exceeds its group limit.") }
         }
     }
-    private func persist(groups: [NewsGroupInfo], posts: [NewsPost], nextGroupID: UInt32, nextMessages: [String: UInt32]) throws {
+    private func persist(groups: [NewsGroupInfo], posts: [NewsPost], nextGroupID: UInt32, nextMessages: [String: UInt32], archives: [Archive]? = nil) throws {
         try validate(groups: groups, posts: posts, nextGroupID: nextGroupID, nextMessages: nextMessages)
         if let url {
-            let saved = Saved(nextID: nextMessages["1"] ?? 1, posts: posts, groups: groups, nextGroupID: nextGroupID, nextMessageIDs: nextMessages)
+            let saved = Saved(archives: archives ?? self.archives, nextID: nextMessages["1"] ?? 1, posts: posts, groups: groups, nextGroupID: nextGroupID, nextMessageIDs: nextMessages)
             try JSONEncoder().encode(saved).write(to: url, options: .atomic)
         }
     }

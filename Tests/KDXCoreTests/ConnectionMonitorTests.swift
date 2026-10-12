@@ -32,11 +32,11 @@ final class ConnectionMonitorTests: XCTestCase {
         XCTAssertEqual(entries.count, 1)
         let entry = try XCTUnwrap(entries.first)
         XCTAssertEqual(entry.userID, 8); XCTAssertEqual(entry.nickname, "probe")
-        XCTAssertEqual(entry.login, "admin"); XCTAssertEqual(entry.accountName, "Administrator")
+        XCTAssertEqual(entry.login, "admin"); XCTAssertEqual(entry.accountClassName, "Administrator")
         XCTAssertEqual(entry.address, "127.0.0.1:50984")
-        XCTAssertEqual(entry.loginTime, 0x3a36cb6db33); XCTAssertEqual(entry.lastActivity, 0x3a36cb6e662)
+        XCTAssertEqual(entry.loginTime, 0x3a36cb6db33); XCTAssertEqual(entry.serverTime, 0x3a36cb6e662)
         var canonical = payload
-        let end = 104 + [entry.nickname,entry.login,entry.accountName,entry.address].reduce(0) { $0 + $1.utf8.count }
+        let end = 104 + [entry.nickname,entry.login,entry.accountClassName,entry.address].reduce(0) { $0 + $1.utf8.count }
         for at in end..<canonical.count { canonical[at] = 0 }
         XCTAssertEqual(try MonitoredConnection.encodeList(entries), canonical, "Captured padding contains uninitialized bytes")
         var opaque = canonical; opaque[32] = 91; opaque[100] = 93
@@ -73,10 +73,10 @@ final class ConnectionMonitorTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(5)); try await member.sendChat("Activity")
         let updated = try await admin.connectionMonitor()
         let after = try XCTUnwrap(updated.first { $0.login == "member" })
-        XCTAssertEqual(before.loginTime, after.loginTime); XCTAssertGreaterThan(after.lastActivity, before.lastActivity)
+        XCTAssertEqual(before.loginTime, after.loginTime); XCTAssertGreaterThan(after.serverTime, before.serverTime)
         _ = try await member.request(type: 108)
         let afterPing = try await admin.connectionMonitor()
-        XCTAssertEqual(afterPing.first { $0.login == "member" }?.lastActivity, after.lastActivity)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(afterPing.first { $0.login == "member" }?.serverTime), after.serverTime)
         guest.disconnect()
         for _ in 0..<100 where server.users.count > 2 { try await Task.sleep(for: .milliseconds(5)) }
         let remaining = try await member.connectionMonitor()

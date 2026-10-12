@@ -55,17 +55,19 @@ public struct ServerInfo: Sendable {
     public var name: String, description: String
     public var userID: UInt32
     public var canModifySettings: Bool
+    public var transferPort: UInt16 = 0
     var sessionKey: [UInt8]
     func encode() throws -> [UInt8] {
         let name = try shortText(name), description = try shortText(description)
         var out = [UInt8](repeating: 0, count: 76)
-        out.replaceSubrange(0..<32, with: sessionKey); out.put(userID, at: 36); out.put(UInt16(1620), at: 40)
+        out.put(UInt32(transferPort), at: 32); out.replaceSubrange(0..<32, with: sessionKey); out.put(userID, at: 36); out.put(UInt16(1620), at: 40)
         out[43] = canModifySettings ? 1 : 0; out[71] = 2; out[72] = UInt8(name.count); out[73] = UInt8(description.count)
         return out + name + description
     }
     static func decode(_ b: [UInt8]) throws -> ServerInfo {
         try b.require(76); let end = 76 + Int(b[72]) + Int(b[73]); try b.require(end + Int(b[74]))
-        return ServerInfo(name: b.text(76..<76+Int(b[72])), description: b.text(76+Int(b[72])..<end), userID: b.u32(36), canModifySettings: b.u16(42) != 0, sessionKey: Array(b.prefix(32)))
+        guard b.u32(32) <= UInt16.max else { throw KDXError.invalid("Invalid transfer port.") }
+        return ServerInfo(name: b.text(76..<76+Int(b[72])), description: b.text(76+Int(b[72])..<end), userID: b.u32(36), canModifySettings: b.u16(42) != 0, transferPort: UInt16(b.u32(32)), sessionKey: Array(b.prefix(32)))
     }
 }
 public struct ChatLine: Identifiable, Sendable {

@@ -11,7 +11,7 @@ final class PartialUpload {
     let reportedOffset: UInt64, offset: UInt64
     init(files: SharedFiles, request: UploadRequest, owner: String?) throws {
         let name = request.strings[0]; try RemotePath.validateName(name)
-        let parent = try files.directory(request.folder.names)
+        let parent = try files.directory(request.folder.localNames())
         var directory: Int32 = -1, dataFD: Int32 = -1
         do {
             var existing = stat()

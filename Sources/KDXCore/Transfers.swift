@@ -1,6 +1,6 @@
 import Foundation
 
-/// Milliseconds using the reference's inferred 1900 epoch, consistent with capture dates.
+/// Milliseconds since 1900-01-01 UTC, verified in the original server.
 enum KDXTime {
     static let unixOffset: TimeInterval = 2_208_988_800
     static func decode(_ value: UInt64) -> Date { Date(timeIntervalSince1970: Double(value) / 1000 - unixOffset) }

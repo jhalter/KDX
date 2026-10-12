@@ -66,3 +66,15 @@ using scripts/extract-capture.py and the public lab password. Port 43718
 covers room records and class privilege 36 toggles (frames 145 and 183);
 port 60398 covers login ordering, empty 213 (frame 167), and Public Chat
 join (frames 175/176). See captures/linux-chat-rooms.md in the reference.
+
+October 12 update: the linux-catalog-volumes-58160 and linux-files-59246
+streams come from scottanderson/kdx b9777a3f6c95fb1c20845958efaab05e75bcec33,
+crates/kdx-proto/tests/fixtures/. Same upstream MIT license noted above.
+linux-accounts-folder-access-55746, linux-folder-access-guest-54824,
+linux-text-encoding-40504, and linux-tracker-60698/43808 were extracted from
+that revision's same-named captures using Ethernet/IPv4 TCP sequence order,
+without changing handshake, ciphertext, or padding bytes. Server sessions use
+the public fixture password 'lab-only-pw!1'; tracker sessions are anonymous
+with an empty password. extract-capture.py accepts optional SERVER_PORT=10800
+for the tracker streams. linux-tracker-registration.bin is the exact first
+UDP payload to port 10800, capture frame 23. No captures were made locally.

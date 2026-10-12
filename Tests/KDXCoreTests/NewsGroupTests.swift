@@ -34,14 +34,14 @@ final class NewsGroupTests: XCTestCase {
         XCTAssertEqual(store.posts.first?.id, 7)
         XCTAssertEqual(try store.add(author: "A", login: "a", subject: "New", body: "New post").id, 8)
         XCTAssertThrowsError(try store.delete(id: 7, login: "a", admin: false))
-        var group = NewsGroupInfo(name: "Small"); group.sizeLimitKiB = 2
+        var group = NewsGroupInfo(name: "Small"); group.sizeLimitKiB = 8
         group = try store.saveGroup(group, creating: true)
-        for _ in 0..<3 { _ = try store.add(groupID: group.id, author: "A", login: "a", subject: "Budget", body: String(repeating: "x", count: 650)) }
+        for _ in 0..<3 { _ = try store.add(groupID: group.id, author: "A", login: "a", subject: "Budget", body: String(repeating: "x", count: 3000)) }
         XCTAssertEqual(store.posts.filter { $0.groupID == group.id }.map(\.id), [2,3])
-        group.sizeLimitKiB = 1; _ = try store.saveGroup(group, creating: false)
+        group.sizeLimitKiB = 4; _ = try store.saveGroup(group, creating: false)
         XCTAssertEqual(store.posts.filter { $0.groupID == group.id }.map(\.id), [3])
         let restored = try NewsStore(url: file)
-        XCTAssertEqual(try restored.group(group.id).sizeLimitKiB, 1)
+        XCTAssertEqual(try restored.group(group.id).sizeLimitKiB, 4)
         try restored.deleteGroup(group.id)
         let next = try restored.saveGroup(NewsGroupInfo(name: "Next"), creating: true)
         XCTAssertGreaterThan(next.id, group.id)
@@ -93,7 +93,7 @@ final class NewsGroupTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: file) }
         let store = try NewsStore(url: file)
-        var group = try store.group(1); group.sizeLimitKiB = 2048
+        var group = try store.group(1); group.sizeLimitKiB = 8048
         _ = try store.saveGroup(group, creating: false)
         for i in 0..<65 { _ = try store.add(author: "A", login: "a", subject: "Post \(i)", body: String(repeating: "x", count: 16384)) }
         var config = ServerConfiguration(); config.newsFile = file.path
@@ -103,7 +103,8 @@ final class NewsGroupTests: XCTestCase {
         let (a,b) = MemoryTransport.pair(); server.accept(wire: b, table: table)
         try await client.connect(wire: a, login: "", password: "", nickname: "Reader", table: table)
         try await client.loadNews()
-        XCTAssertEqual(client.newsPosts.count, 65); XCTAssertEqual(client.newsPosts.first?.subject, "Post 64")
+        XCTAssertEqual(client.newsPosts.count, 63); XCTAssertEqual(client.newsPosts.first?.subject, "Post 64")
         XCTAssertTrue(client.newsPosts.allSatisfy { $0.body.count == 16384 })
+        XCTAssertEqual(try NewsStore(url: file).archives.flatMap(\.posts).count, 2)
     }
 }
