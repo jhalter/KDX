@@ -187,10 +187,15 @@ import Observation
         request.timeout?.cancel(); request.continuation.resume(throwing: error)
     }
     public func updateProfile(nickname: String, info: String) async throws {
+        guard let user = currentUser else { throw KDXError.disconnected }
+        try await updateProfile(nickname:nickname,info:info,colors:user.colors,icon:user.icon,gradient:user.flags & 4 != 0)
+    }
+    public func updateProfile(nickname: String, info: String, colors: [UInt8], icon: [UInt8], gradient: Bool) async throws {
         guard var user = currentUser else { throw KDXError.disconnected }
         guard !nickname.isEmpty else { throw KDXError.invalid("Enter a nickname.") }
         user.id = 0; user.nickname = nickname; user.info = info
-        user.badge = 0; user.server15 = 0; user.server16 = 0; user.flags &= 4
+        user.colors = colors; user.icon = icon
+        user.badge = 0; user.server15 = 0; user.server16 = 0; user.flags = gradient ? 4 : 0
         try await sendChecked(type: 100, payload: user.encode())
     }
     public func setStatus(_ status: UInt8) async throws {
@@ -314,14 +319,19 @@ import Observation
         if let index = rooms.firstIndex(where: { $0.id == room }) { rooms[index].memberCount = max(0, rooms[index].memberCount-1) }
     }
     public func createPrivateChat() async throws {
+        _ = try await createPrivateChatWindow()
+    }
+    /// Returns the created room independently of the currently focused room.
+    public func createPrivateChatWindow() async throws -> ChatWindow {
         guard joining == nil else { throw KDXError.invalid("A room is already being opened.") }
         let token = UUID(); joining = token
         defer { if joining == token { joining = nil; schedulePublicChatJoin() } }
         let reply = try await request(type: 200)
-        guard reply.type == 216, chatWindow != nil else { throw KDXError.invalid("Unexpected private-chat reply.") }
+        guard reply.type == 216 else { throw KDXError.invalid("Unexpected private-chat reply.") }
+        return try ChatWindow.decode(reply.payload)
     }
-    public func inviteToChat(users: [UInt32]) async throws {
-        guard let room = joinedRoom else { throw KDXError.invalid("Join a chat first.") }
+    public func inviteToChat(users: [UInt32], room target: UInt32? = nil) async throws {
+        guard let room = target ?? joinedRoom, joinedRooms[room] != nil else { throw KDXError.invalid("Join a chat first.") }
         try await sendChecked(type: 211, payload: ChatInviteRequest(roomID: room, users: users).encode())
     }
     public func acceptInvitation(_ invitation: ChatInvitation) async throws {
@@ -348,8 +358,8 @@ import Observation
     private func checkMutation(_ response: Message, type: UInt32) throws {
         guard response.type == 1, response.payload.count == 8, response.payload.u32(0) == 0, response.payload.u32(4) == type else { throw KDXError.invalid("Unexpected update reply.") }
     }
-    public func setTopic(_ text: String) async throws {
-        guard let room = joinedRoom else { throw KDXError.invalid("Join a chat first.") }
+    public func setTopic(_ text: String, room target: UInt32? = nil) async throws {
+        guard let room = target ?? joinedRoom, joinedRooms[room] != nil else { throw KDXError.invalid("Join a chat first.") }
         let bytes = try shortText(text)
         var payload = [UInt8](repeating: 0, count: 12)
         payload.put(room, at: 0); payload[10] = UInt8(bytes.count)
@@ -367,7 +377,7 @@ import Observation
         guard !bytes.isEmpty, bytes.count <= 4096 else { throw KDXError.invalid("Message must contain 1–4096 UTF-8 bytes.") }
         try await connection.send(type: 300, payload: id.beBytes + [UInt8](repeating: 0, count: 12) + bytes)
         guard self.connection === connection, isConnected else { throw KDXError.disconnected }
-        appendLine(ChatLine(userID: id, sender: "To \(users.first { $0.id == id }?.nickname ?? String(id))", text: text, isPrivate: true))
+        appendLine(ChatLine(userID: id, sender: "To \(users.first { $0.id == id }?.nickname ?? String(id))", text: text, isPrivate: true, isOutgoing: true))
     }
     public func loadAccounts() async throws {
         let response = try await request(type: 512)
@@ -488,11 +498,27 @@ import Observation
         guard response.type == 410 else { throw KDXError.invalid("Unexpected file-information reply.") }
         return try RemoteFileInformation.decode(response.payload)
     }
-    public func listFiles(path: [String] = []) async throws {
+    /// Returns a listing without changing the legacy selected-folder properties.
+    public func files(at path: [String]) async throws -> [RemoteFile] {
         let response = try await request(type: 400, payload: RemotePath(path).encode())
-        let entries = try RemoteFile.decodeList(response.payload)
+        guard response.type == 401 else { throw KDXError.invalid("Unexpected file-list reply.") }
+        return try RemoteFile.decodeList(response.payload)
+    }
+    public func listFiles(path: [String] = []) async throws {
+        let entries = try await files(at: path)
         files = entries; filePath = path
     }
+    public func markRoomRead(_ room: UInt32) { if unreadRooms[room] != nil { unreadRooms.removeValue(forKey: room) } }
+    public func selectRoom(_ room: UInt32?) {
+        joinedRoom = room.flatMap { joinedRooms[$0] == nil ? nil : $0 }
+        if let joinedRoom { markRoomRead(joinedRoom) }
+    }
+    public func privateMessages(with user: UInt32) -> [ChatLine] {
+        chatLines.filter { $0.isPrivate && $0.userID == user }
+    }
+    public func deletePrivateMessages(with user: UInt32) { chatLines.removeAll { $0.isPrivate && $0.userID == user } }
+    public var privateMessageUsers: [UInt32] { Array(Set(chatLines.filter(\.isPrivate).map(\.userID))).sorted() }
+
     public func cancelTransfer() { activeTransfer?.close() }
     private func attach() async throws -> WireConnection {
         guard let info = serverInfo, let table, let factory = transferFactory else { throw KDXError.disconnected }
@@ -506,8 +532,12 @@ import Observation
         } catch { wire.close(); if activeTransfer === wire { activeTransfer = nil }; throw error }
     }
     public func download(_ file: RemoteFile, to destination: URL) async throws {
+        try await download(file, at: filePath, to: destination)
+    }
+    /// The folder is captured by the caller; browsing cannot redirect a queued download.
+    public func download(_ file: RemoteFile, at folder: [String], to destination: URL) async throws {
         guard let connection else { throw KDXError.disconnected }
-        let path = filePath + [file.name]
+        let path = folder + [file.name]
         let identity = DownloadIdentity(server: connection.endpointDescription, account: sessionLogin, path: path, destination: destination.lastPathComponent)
         let staging = try PartialDownload(destination: destination, identity: identity)
         let wire = try await attach()
@@ -537,6 +567,10 @@ import Observation
     }
     public func upload(from source: URL) async throws {
         let folder = filePath
+        try await upload(from: source, to: folder)
+        if filePath == folder { try await listFiles(path: folder) }
+    }
+    public func upload(from source: URL, to folder: [String]) async throws {
         let wire = try await attach()
         defer { wire.close(); if activeTransfer === wire { activeTransfer = nil; transferStatus = nil } }
         transferStatus = "Uploading \(source.lastPathComponent)"; transferProgress = 0
@@ -562,7 +596,6 @@ import Observation
         guard complete.type == 418 else { throw KDXError.invalid("Upload was not acknowledged.") }
         guard activeTransfer === wire else { throw KDXError.disconnected }
         transferProgress = 1
-        if filePath == folder { try await listFiles(path: folder) }
     }
     private func handle(_ message: Message) throws {
         let b = message.payload

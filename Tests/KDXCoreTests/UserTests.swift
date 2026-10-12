@@ -70,6 +70,33 @@ final class UserTests: XCTestCase {
         XCTAssertThrowsError(try invalid.encode())
         XCTAssertEqual(member.currentUser?.nickname, "Account Name")
     }
+    @MainActor func testProfileAppearanceBroadcastAndCompatibleTextUpdate() async throws {
+        let table = ChallengeTable(testBytes:[UInt8](repeating:26,count:1739))
+        var config = ServerConfiguration(); config.accounts = [ServerAccount(login:"member",password:"pw")]
+        let server = KDXServer(configuration:config), member = KDXClient(), observer = KDXClient()
+        defer { member.disconnect(); observer.disconnect(); server.stop() }
+        _ = try await connect(member,server:server,login:"member",table:table)
+        _ = try await connect(observer,server:server,login:"member",table:table)
+        let id = try XCTUnwrap(member.currentUser?.id), colors: [UInt8] = [12,34,56,78,90,123]
+        let icon: [UInt8] = [1,0,255,127,0]+[UInt8](repeating:0,count:512)
+        try await member.updateProfile(nickname:"With appearance",info:"About",colors:colors,icon:icon,gradient:true)
+        _ = try await observer.request(type:115)
+        let remote = try XCTUnwrap(observer.users.first { $0.id == id })
+        XCTAssertEqual(remote.colors,colors); XCTAssertEqual(remote.icon,icon); XCTAssertEqual(remote.flags,4)
+        XCTAssertFalse(remote.isAdmin); XCTAssertEqual(remote.server15,0); XCTAssertEqual(remote.server16,0)
+        try await member.updateProfile(nickname:"Text only",info:"New description")
+        XCTAssertEqual(member.currentUser?.colors,colors); XCTAssertEqual(member.currentUser?.icon,icon); XCTAssertEqual(member.currentUser?.flags,4)
+        for (badColors,badIcon) in [(Array(colors.dropLast()),icon),(colors,[UInt8](repeating:0,count:0x709))] {
+            do {
+                try await member.updateProfile(nickname:"Invalid",info:"",colors:badColors,icon:badIcon,gradient:false)
+                XCTFail("Invalid appearance must fail before transmission")
+            } catch {}
+            XCTAssertEqual(member.currentUser?.nickname,"Text only")
+            XCTAssertTrue(member.isConnected)
+        }
+        try await member.updateProfile(nickname:"Cleared",info:"",colors:[0,0,0,0,0,0],icon:[],gradient:false)
+        XCTAssertEqual(member.currentUser?.icon,[]); XCTAssertEqual(member.currentUser?.flags,0)
+    }
     @MainActor private func connect(_ client: KDXClient, server: KDXServer, login: String, table: ChallengeTable) async throws -> WireConnection {
         let (a,b) = MemoryTransport.pair(); server.accept(wire: b, table: table)
         try await client.connect(wire: a, login: login, password: "pw", nickname: login, table: table); return a

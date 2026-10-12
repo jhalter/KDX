@@ -75,6 +75,7 @@ public struct ChatLine: Identifiable, Sendable {
     public var sender: String
     public var text: String
     public var isPrivate: Bool = false
+    public var isOutgoing: Bool = false
     public var roomID: UInt32?
 }
 public struct ChatRoom: Identifiable, Equatable, Sendable {
