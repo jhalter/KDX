@@ -43,6 +43,19 @@ public struct HAPChromeArtwork: Codable, Equatable, Sendable {
         horizontalSliderThumb = try reference.data(0x108dc8,112)
         try validate()
     }
+    /// Same toolkit rasters in the verified Windows server shipped in the OSX wrapper.
+    init(serverReference b: AssetBytes) throws {
+        close = try b.data(0x84618,98); maximize = try b.data(0x8467a,98)
+        minimize = try b.data(0x846dc,98); menu = try b.data(0x8473e,224)
+        resize = try b.data(0x84f9c,153)
+        horizontalScrollGrip = try b.data(0x85090,16); verticalScrollGrip = try b.data(0x850a0,16)
+        checkboxOff = try b.data(0x84a34,98); checkboxOn = try b.data(0x84a96,98); checkboxMixed = try b.data(0x84af8,98)
+        radioOff = try b.data(0x84b5a,98); radioOn = try b.data(0x84bbc,98); radioMixed = try b.data(0x84c1e,98)
+        defaultButtonCorners = try b.data(0x849f8,60)
+        horizontalSliderThumb = try b.data(0x8489e,112)
+        progress = nil; banner = nil; wonderLight = nil
+        try validate()
+    }
     func validate() throws {
         try progress?.validate()
         try banner?.validate()

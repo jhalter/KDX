@@ -4,9 +4,9 @@
 
 # macOS KDX
 
-A native macOS client and server for Haxial KDX, written in Swift 6. The AppKit
-client recreates the original themed interface; the SwiftUI server shares the
-same Swift protocol implementation. No external package dependencies.
+A native macOS client and server for Haxial KDX, written in Swift 6. Both apps use AppKit
+to recreate the original themed interfaces and share the same Swift protocol
+implementation. No external package dependencies.
 
 ## Status
 
@@ -29,9 +29,9 @@ limits.
 
 - **Platform:** macOS Tahoe 26 or macOS Golden Gate 27.
 - **Build tools:** Xcode with Swift 6 support and the macOS 26 SDK or later.
-- **Original appearances:** an original KDX Client 1.600 application or archive
-  for the first app-bundle build. Later builds can reuse the validated
-  `.build/OriginalAppearances.json` cache.
+- **Original appearances:** original KDX Client 1.600 and KDX Server 1.600
+  applications for the first app-bundle build. Later builds reuse the validated
+  `.build/OriginalAppearances.json` and `.build/OriginalServerAppearances.json` caches.
 - **Authentication:** the original KDX challenge table, downloaded or imported
   through either app. It is not included in this repository.
 
@@ -42,7 +42,9 @@ limits.
 From the repository root:
 
 ```sh
-KDX_REFERENCE="/path/to/original/KDXClient.app" scripts/build-apps.sh
+KDX_REFERENCE="/path/to/original/KDXClient.app" \
+KDX_SERVER_REFERENCE="/path/to/original/KDX Server.app" \
+scripts/build-apps.sh
 ```
 
 This creates `dist/KDX Client.app` and `dist/KDX Server.app`.
@@ -53,15 +55,17 @@ You can also open `Package.swift` in Xcode to work on the source.
 1. Open KDX Client or KDX Server and choose **Download Challenge Table**, or use
    **Import Challenge Table…** with an original executable, ZIP archive, or exported
    table. Both apps share the imported table. See [table setup](docs/TABLE-IMPORT.md).
-2. To host, open KDX Server, configure a name, port, shared folder, and accounts,
-   then start the server. Enable guest access if desired.
+2. To host, open KDX Server. Its window menu (also available as the macOS
+   **Server** menu) provides **Settings** for administrator credentials and port,
+   **Server Settings…** for name/shared folder/guests, **Accounts…**, and
+   **Challenge Table…**. Choose **Start Server** when ready.
 3. In KDX Client, open **Connect…** to browse the default Higher Intellect Tracker
    or connect directly to a server. Use `127.0.0.1` for a server on the same Mac;
    leave login and password blank for guest access.
 4. Use the floating bar for chat, users, messages, files, and transfers. Choose a
    theme under **KDX Client → Appearances…**.
 
-See the [client guide](docs/CLIENT.md#use) for controls and workflows.
+See the [client guide](docs/CLIENT.md#use) and [server guide](docs/SERVER-UI.md) for controls and workflows.
 
 ## Tests
 
@@ -93,7 +97,7 @@ establish live interoperability.
 | `Sources/KDXCore/` | Shared protocol, client/server sessions, authentication, and transfers |
 | `Sources/KDXClientUI/` | AppKit interface and original appearance renderer |
 | `Sources/KDXClient/` | Client app entry point |
-| `Sources/KDXServer/` | SwiftUI server app |
+| `Sources/KDXServer/` | AppKit server entry point |
 | `Sources/KDXAppearanceTool/` | Appearance extraction and validation |
 | `Tests/` | Protocol fixtures, integration tests, and UI tests |
 | `scripts/` | Build, test, and interoperability commands |

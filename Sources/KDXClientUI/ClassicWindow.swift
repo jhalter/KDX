@@ -267,6 +267,7 @@ import AppKit
                 field.textColor = ClassicStyle.shared.color(field.drawsBackground ? 11 : 5)
                 if field.drawsBackground { field.backgroundColor = ClassicStyle.shared.color(10) }
             }
+            (view as? ClassicServerEditor)?.applyStyle()
             (view as? ClassicButtonBarView)?.applyStyle()
             (view as? ClassicPopUpButton)?.applyStyle()
             (view as? ClassicScrollView)?.applyStyle()

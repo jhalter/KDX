@@ -12,6 +12,6 @@ let package = Package(name: "macOS-KDX", platforms: [.macOS("26.0")], products: 
     .executableTarget(name: "KDXAppearanceTool", dependencies: ["KDXClientUI"]),
     .testTarget(name: "KDXClientUITests", dependencies: ["KDXClientUI", "KDXCore"]),
     .executableTarget(name: "KDXClient", dependencies: ["KDXClientUI"]),
-    .executableTarget(name: "KDXServer", dependencies: ["KDXCore"]),
+    .executableTarget(name: "KDXServer", dependencies: ["KDXClientUI"]),
     .testTarget(name: "KDXCoreTests", dependencies: ["KDXCore"], resources: [.copy("Fixtures")])
 ])

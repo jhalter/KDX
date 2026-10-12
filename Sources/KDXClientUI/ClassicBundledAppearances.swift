@@ -20,7 +20,7 @@ public enum ClassicBundledAppearances {
         guard appearances.count == 16, Set(appearances.map(\.id)).count == 16,
               appearances.contains(where:{ $0.name == "Mach Lavender" }),
               appearances.contains(where:{ $0.name == "Amber CRT" }) else {
-            throw AppearanceError.invalid("Bundled appearances require all 16 original KDX Client 1.600 themes.")
+            throw AppearanceError.invalid("Bundled appearances require all 16 original KDX 1.600 themes.")
         }
         for appearance in appearances {
             try appearance.validate()

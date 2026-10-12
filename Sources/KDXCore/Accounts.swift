@@ -214,6 +214,8 @@ public struct ServerAccount: Codable, Identifiable, Equatable, Sendable {
         if isAdmin { privileges.set(0, true); privilegeMask.set(0, true) }
         key = AccountKey(password: password).bytes
     }
+    /// Change credentials without replacing account privileges or metadata.
+    public mutating func setPassword(_ password: String) { key = AccountKey(password:password).bytes }
     private enum CodingKeys: String, CodingKey { case login, name, classID, privileges, privilegeMask, key, created, modified, lastLogin, editor, third, unknown77, isAdmin }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
