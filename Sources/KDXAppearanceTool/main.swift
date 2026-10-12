@@ -1,5 +1,5 @@
 import Foundation
-import KDXClassicUI
+import KDXClientUI
 
 @main enum KDXAppearanceTool {
     static func main() async {

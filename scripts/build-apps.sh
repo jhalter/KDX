@@ -6,15 +6,15 @@ export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache"
 swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local
 bin_path=$(swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local --show-bin-path)
 appearance_catalog="$PWD/.build/OriginalAppearances.json"
-if [[ -n "${KDX_CLASSIC_REFERENCE:-}" ]]; then
-    "$bin_path/KDXAppearanceTool" export "$KDX_CLASSIC_REFERENCE" "$appearance_catalog"
+if [[ -n "${KDX_REFERENCE:-}" ]]; then
+    "$bin_path/KDXAppearanceTool" export "$KDX_REFERENCE" "$appearance_catalog"
 elif [[ ! -f "$appearance_catalog" ]]; then
-    echo 'Set KDX_CLASSIC_REFERENCE to the original KDX Client 1.600 application or archive for the first bundled-theme build.' >&2
+    echo 'Set KDX_REFERENCE to the original KDX Client 1.600 application or archive for the first bundled-theme build.' >&2
     exit 1
 fi
 "$bin_path/KDXAppearanceTool" verify "$appearance_catalog"
-for product in KDXClient KDXServer KDXClassic; do
-    case "$product" in KDXClient) title="KDX Client";; KDXServer) title="KDX Server";; KDXClassic) title="KDX Classic";; esac
+for product in KDXClient KDXServer; do
+    case "$product" in KDXClient) title="KDX Client";; KDXServer) title="KDX Server";; esac
     bundle="dist/$title.app"
     mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/Notices"
     # Replace the inode so rebuilding does not modify pages mapped by a running app.
@@ -40,7 +40,7 @@ $icon_plist
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to KDX servers and accept KDX client connections on your network.</string>
 </dict></plist>

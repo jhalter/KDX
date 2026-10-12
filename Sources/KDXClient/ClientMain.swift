@@ -1,5 +1,5 @@
 import AppKit
-import KDXClassicUI
+import KDXClientUI
 
 @main
 enum KDXClientMain {

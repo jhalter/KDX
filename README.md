@@ -1,80 +1,116 @@
+<p align="center">
+  <img src="Resources/AppIcon/AppIcon.png" alt="macOS KDX icon" width="128">
+</p>
+
 # macOS KDX
 
-Native macOS applications written in Swift 6: an AppKit client and a SwiftUI server, with a shared Swift implementation of the Haxial KDX wire protocol. Requires macOS 14 or later and Xcode with Swift 6 support. No external package dependencies.
+A native macOS client and server for Haxial KDX, written in Swift 6. The AppKit
+client recreates the original themed interface; the SwiftUI server shares the
+same Swift protocol implementation. No external package dependencies.
 
-This is an implementation in progress, not yet a fully verified replacement for every original KDX feature. Protocol work follows [scottanderson/kdx](https://github.com/scottanderson/kdx), pinned to `9807f42efeb565df8b92741074fdcd625bb24d16`. The reference's server crate is a placeholder; this repository implements its own server.
+## Status
 
-## Build
+The client supports tracker browsing, multiple server connections, chat, private
+messages, file browsing, and resumable uploads and downloads. Local builds bundle
+all 16 original appearances, with Mach Lavender selected by default.
+
+Compatibility is incomplete. News and advanced remote administration have core
+and server support but still need client views. Visual fidelity and full
+interoperability with legacy peers remain unverified. KDX preserves its historical
+SHA-1/Twofish protocol and does not provide modern authenticated transport security.
+
+See the [implementation status](docs/STATUS.md) for supported features and remaining
+work, and the [interoperability checklist](docs/INTEROPERABILITY.md) for verification
+limits.
+
+## Requirements
+
+- **Platform:** macOS Tahoe 26 or macOS Golden Gate 27.
+- **Build tools:** Xcode with Swift 6 support and the macOS 26 SDK or later.
+- **Original appearances:** an original KDX Client 1.600 application or archive
+  for the first app-bundle build. Later builds can reuse the validated
+  `.build/OriginalAppearances.json` cache.
+- **Authentication:** the original KDX challenge table, downloaded or imported
+  through either app. It is not included in this repository.
+
+## Quick start
+
+### Build the apps
+
+From the repository root:
+
+```sh
+KDX_REFERENCE="/path/to/original/KDXClient.app" scripts/build-apps.sh
+```
+
+This creates `dist/KDX Client.app` and `dist/KDX Server.app`.
+You can also open `Package.swift` in Xcode to work on the source.
+
+### Connect or host
+
+1. Open KDX Client or KDX Server and choose **Download Challenge Table**, or use
+   **Import Challenge Table…** with an original executable, ZIP archive, or exported
+   table. Both apps share the imported table. See [table setup](docs/TABLE-IMPORT.md).
+2. To host, open KDX Server, configure a name, port, shared folder, and accounts,
+   then start the server. Enable guest access if desired.
+3. In KDX Client, open **Connect…** to browse the default Higher Intellect Tracker
+   or connect directly to a server. Use `127.0.0.1` for a server on the same Mac;
+   leave login and password blank for guest access.
+4. Use the floating bar for chat, users, messages, files, and transfers. Choose a
+   theme under **KDX Client → Appearances…**.
+
+See the [client guide](docs/CLIENT.md#use) for controls and workflows.
+
+## Tests
+
+Run the local, headless suite from the repository root:
 
 ```sh
 scripts/test.sh
-KDX_CLASSIC_REFERENCE="/path/to/original/KDXClient.app" scripts/build-apps.sh
 ```
 
-The first bundled-theme build needs the original KDX Client 1.600 application or archive in `KDX_CLASSIC_REFERENCE`. Later builds can reuse the validated `.build/OriginalAppearances.json` cache. Original assets remain outside version control. The build script creates ad-hoc-signed `dist/KDX Client.app`, `dist/KDX Server.app`, and `dist/KDX Classic.app`. It does not launch them. These are local development builds, not notarized distribution releases. The package can also be opened in Xcode by selecting `Package.swift`.
+The default suite covers captured protocol fixtures, in-memory client/server
+sessions, file transfers, and offscreen UI rendering. It does not contact public
+endpoints or require a challenge table. Reference-dependent tests skip when their
+inputs are absent.
 
-## Original KDX interface
-
-KDX Client and KDX Classic use the standalone liquid glass emblem in `Resources/AppIcon/AppIcon.png`, with a transparent background and no backing tile. The build bundles `Resources/AppIcon/AppIcon.icns`, which contains all standard macOS icon sizes from 16 to 1024 pixels.
-
-**KDX Client.app now starts in AppKit**, using the original KDX appearance renderer. It provides multiple server sessions, custom window chrome and an internal minimized-window dock, connection/address book, trackers, chat/users, files, and a per-server transfer queue. All 16 original themes, artwork and fonts are bundled as decoded data, with **Mach Lavender** selected on first launch. Choose another theme or import a custom `.hap` through **KDX Client → Appearances…**. No import is required to use the original themes. See [appearance setup, evidence, limitations, and verification](docs/CLASSIC.md). Visual fidelity remains provisional.
-
-**KDX Client uses only the custom AppKit interface.** News and advanced remote administration await custom views; their core protocol and server support remain implemented. The optional **KDX Classic.app** exposes the same interface and shares its appearances, address book and layout preferences with KDX Client.
-
-## First use
-
-For detailed client controls, follow [the setup and workflow instructions](docs/CLASSIC.md#use).
-
-1. Choose **Download Challenge Table** in either app to retrieve the reference’s pinned original archive from the Internet Archive. Both the archive and extracted table are checksum-verified.
-2. Alternatively, use **Import Challenge Table…** with an original KDX executable, its ZIP archive, or an exported `challenge-table.bin`. Stored and deflated ZIPs are read in memory without extracting files to disk. Both apps use the same local table and recheck it when activated. The original programs are never launched by the importer, and the copyrighted table is not distributed here.
-3. In KDX Server, choose a name, port, shared folder, and accounts. Enable guest access if desired, then start the server. Account settings are editable while stopped. Optionally enable **Advertise this server** under Tracker, enter its address and groups, and set an advertised TCP-port override if required by your port mapping. The server sends updates every five minutes while running; a successful send does not prove tracker acceptance.
-4. In KDX Client, open **Connect…**. It starts with **Higher Intellect Tracker** (`tracker.preterhuman.net:10800`) selected, with no login or password required. New address books also include this editable entry; existing saved books are preserved. Select a tracker (normally port 10800) to browse groups and servers, or connect directly to a server (normally port 10700). Use `127.0.0.1` for a server on the same Mac. Leave login/password blank for guest access. **Options…** provides port, nickname and automatic Public Chat settings. Save endpoints in **Address Book…**.
-5. Use the floating bar to open Chat, Users, Messages, Files and Transfers. **Commands** provides actions for each connected server, including My Profile, Away/Back, reconnect and disconnect. Chat windows retain separate room drafts and unread state. Files supports folder navigation, metadata, upload and download; Transfers manages each server’s queue. Choose a theme under **KDX Client → Appearances…**. News and advanced remote administration do not yet have custom client views.
-
-Server settings, account keys, news, and the shared challenge table reside in `~/Library/Application Support/macOS-KDX/`. Client appearances, address book and layouts use `~/Library/Application Support/KDX Classic/` and Classic preferences. Client passwords are not persisted. Server account keys are password-equivalent credentials stored in an owner-readable settings file. KDX's historical SHA-1/Twofish protocol is preserved for compatibility; it does not provide modern authenticated transport security.
-
-Downloads and uploads never replace an existing destination. Pick a new destination name if one already exists. The server resolves shared paths with descriptor-relative operations and rejects symlinks and traversal. Interrupted uploads from named accounts retain private staging files under `.kdx-uploads` in the destination folder and resume after reconnecting or restarting the server. Staging is isolated by account and never appears in shared listings. Anonymous uploads are discarded on disconnect. Resume the same unchanged source; the legacy protocol does not send a content hash, so choose a new name if its contents changed. Removing `.kdx-uploads` while the server is stopped discards those saved partial uploads. Interrupted downloads retain an owner-readable checkpoint in a hidden `.kdx-downloads` folder beside the destination. Select the same destination on the same server/account to resume, including after reconnecting or restarting the client. If the remote size, timestamps, or metadata changed, the partial is discarded and a retry starts fresh. Completed downloads retain the remote modification time. Both data and resource forks are streamed and preserved; download retries resume each fork separately, while upload retries restart the resource fork as KDX specifies. Each fork is limited to 4 GiB minus one byte. Finder type/creator metadata and comments are not yet mapped. Removing `.kdx-downloads` while no transfer is running discards its saved partial downloads.
-
-## Implemented
-
-The following includes shared-core and server capabilities. News, account/class administration, remote settings, connection monitoring, server history and moderation still need custom client views.
-
-- Anonymous tracker group/server browsing with search and selection into the connection form. The listing format is based on static inspection of Tracker 1.110; live compatibility is pending. Opt-in server advertisements use the statically decoded UDP format; remote acceptance remains unverified. Tracker hosting is not implemented. See [tracker protocol evidence and live probes](docs/TRACKER-PROTOCOL.md).
-- AppKit client with bundled original KDX appearances and a SwiftUI server app; connection state, error reporting, persisted connection fields and server settings.
-- KDX hello/proof authentication, challenge-table extraction/verification, account-key derivation, Twofish-256, header scrambling, and encrypted message framing.
-- Remote server name/greeting/speed settings with atomic persistence, retained opaque settings and icon data, login greetings, and one shared download bandwidth budget. Changing the rate interrupts active downloads so they can resume.
-- Server-wide broadcasts and remote user disconnection with optional reasons or quiet mode, guarded by account privileges. Protected targets are refused; temporary bans remain unsupported.
-- Remote account list/create/edit/rename/delete, class info/list/edit, per-account privilege overrides, and password changes. Changes are persisted before acknowledgment and propagated to logged-in sessions; account info exposes only a password-present flag. Existing settings migrate automatically.
-- Connection, handshake, payload, and transfer I/O deadlines; cancellable I/O; bounded pending requests; stale request/session cleanup.
-- Multi-client server, profile editing, away/back status, detailed user information with permission checks, public chat, private messages, local server disconnect controls, ping and request/reply correlation. Profile updates reach the sender as well as peers; account nickname restrictions remain enforced. User records preserve legacy icon/color fields without trusting client-supplied admin badges.
-- Persistent named chat rooms with remote creation/editing/deletion, per-class join/send/topic access, live membership tracking, and topic changes. Room and account access changes revoke membership immediately. The client keeps simultaneous memberships, separate room transcripts, unread badges, and drafts, while direct messages remain visible across room changes. Private chats support creation, targeted invitations with Accept/Decline, key-protected joins, and automatic deletion when empty. Invitation message text and voice are not implemented; see [private-chat evidence](docs/PRIVATE-CHAT-PROTOCOL.md).
-- File browsing and encrypted streaming of both Mac file forks on authenticated transfer connections, with persistent upload/download resume at KDX block boundaries and modification-date preservation. Transfer sessions use the session key and must originate from the parent connection's IP. Uploads require the upload privilege.
-- Connection monitoring for accounts, addresses, and session times, with permission checks, periodic refresh, and cancellation cleanup. Transfer-progress records remain undecoded; see [connection-monitor evidence](docs/CONNECTION-MONITOR.md).
-- Remote server history with permission checks, live updates and bounded in-memory retention. See [history protocol evidence](docs/HISTORY-PROTOCOL.md).
-- File and folder information with a native inspector for kind, data size, creation date, and modification date; permission checks and descriptor-based path confinement. Finder type/creator/comment mapping is still unverified.
-- News listing, reading, posting, latest-own-post/admin deletion, change notifications, persistent group administration, class access, storage budgets, and large-list handling. See [newsgroup protocol evidence](docs/NEWS-PROTOCOL.md).
-- Import of an existing KDX binary or raw challenge table; protocol-compatible credentials, not a custom login protocol.
-
-## Verification
-
-`ProtocolTests` includes a Twofish known-answer vector and independent captured traffic from the reference. It reproduces both handshakes, authentication proofs, and every encrypted message in the first-connect fixture byte for byte. User tests additionally reproduce captured identity, user-list, and detailed-information records byte for byte, including icon and color data. Chat and account tests additionally compare chat windows, topics, room records/lists, accounts, classes, and account lists against independently captured reference traffic. Transfer fixtures also cover full downloads, a non-aligned resume request, and an end-of-file resume, including their independent attachment session keys. Upload request/reply/data/completion fixtures are checked as well. Connection-monitor records, history snapshots and live events, server-settings blobs and acknowledgments, file/folder info and file lists, broadcasts and disconnect notices, private-room creation and invitations, class-edit requests and success replies, plus newsgroup creation/info/edit/delete/list records, are also checked against extracted reference captures. No challenge table is needed for the regular fixture tests. An optional original-archive test additionally verifies the complete table against both captured handshake responses; see [table setup and verification](docs/TABLE-IMPORT.md).
-
-The headless integration suite exercises actual client/server session code over a fragmented in-memory byte transport. It checks multi-client chat and private messages, authentication rejection, news ownership/persistence, and upload/download integrity across multiple cipher chunks. Filesystem tests cover traversal, symlinks, overwrite refusal, and temporary-file cleanup. Account tests cover persistence rollback on write failure, privilege escalation rejection, old-password rejection, connected-session updates, protected account deletion, and persisted class edits with immediate member/guest revocation and preserved overrides. Chat tests cover room persistence/rollback, message isolation, topic delivery to new members, membership cleanup, deletion, and live permission revocation. Private-chat tests check invitation targeting, key validation, isolation, decline, creation limits, and empty-room cleanup after leaving, disconnecting, or revocation. Lifecycle tests cover stalled I/O, cancellation, timed-out requests, and replacing an in-progress login. Transfer tests interrupt actual streams after partial data, verify resumed byte counts/integrity, enforce exclusive checkpoint access, reject changed files and symlinks, verify upload recovery across a server restart, account isolation, anonymous cleanup, and non-overwrite behavior, and reconnect while an older transfer is still unwinding. Resource-fork tests compare against macOS named-fork file access and cover multi-chunk upload/download, resource-only files, separate resource download resume, and interrupted resource uploads. Nonempty resource-fork interoperability with a legacy Mac peer remains unverified; the reference fixtures come from Linux and contain empty resource forks. File/news dates now use the reference’s inferred 1900 epoch; its timestamp example is consistent with the capture year. User tests verify profile/status broadcasts, nickname restrictions, user-info denial and missing-user errors, and resistance to forged administrator markers. News tests cover class access, post-only groups, storage pruning, migration, failed-write rollback, and replies larger than 1 MiB. A synthetic table is available only to internal test code, never to the apps' import path.
-
-Use [the interoperability checklist](docs/INTEROPERABILITY.md) and `scripts/verify-interop.sh` to run the three headless live gates against explicit server/tracker endpoints. The command requires both host variables and never launches the GUI apps.
-
-Real TCP remains a separate test gate:
+To include the local TCP test in an environment that permits listeners:
 
 ```sh
 KDX_TEST_TCP=1 scripts/test.sh
 ```
 
-The implementation environment currently denies TCP listener creation with `EPERM`. The opt-in test is therefore explicitly skipped in the default suite; passing the default suite does **not** establish live TCP interoperability. The app bundles have been built and KDX Client has been launched at the user’s request. Offscreen rendering is covered by tests; desktop interaction and visual fidelity still need manual verification. A real challenge table and live reference/legacy peers are also still needed for a complete interoperability audit.
+See the [live verification instructions](docs/INTEROPERABILITY.md) for testing
+against independent servers and trackers. Passing the default suite does not
+establish live interoperability.
 
-Tracker tests cover statically derived list layouts, encrypted anonymous queries, transaction correlation, malformed data, wrong service versions, cancellation, deadlines, and payload limits. `LiveInteropTests` provides opt-in probes for independent tracker listing and server login; see [live-check instructions](docs/TRACKER-PROTOCOL.md#headless-live-checks). No live endpoint is contacted by the default suite.
+## Code and documentation
 
-See [implementation status](docs/STATUS.md) for remaining work and completion gates.
+| Path | Contents |
+| --- | --- |
+| `Sources/KDXCore/` | Shared protocol, client/server sessions, authentication, and transfers |
+| `Sources/KDXClientUI/` | AppKit interface and original appearance renderer |
+| `Sources/KDXClient/` | Client app entry point |
+| `Sources/KDXServer/` | SwiftUI server app |
+| `Sources/KDXAppearanceTool/` | Appearance extraction and validation |
+| `Tests/` | Protocol fixtures, integration tests, and UI tests |
+| `scripts/` | Build, test, and interoperability commands |
+| `docs/` | Setup guides, protocol evidence, and implementation status |
 
-## Source attribution
+## Software updates and releases
 
-The protocol and captured test fixtures derive from scottanderson/kdx (MIT license in `Notices/KDX-MIT.txt`). The Swift Twofish implementation adapts RustCrypto's Twofish algorithm (MIT license in `Notices/RustCrypto-MIT.txt`). These notices are included in the app bundles. The original Haxial programs and complete challenge table are not included.
+The build script produces ad-hoc-signed local development apps. These are not
+notarized distribution releases.
+
+## License and credits
+
+Protocol work and captured fixtures derive from
+[scottanderson/kdx](https://github.com/scottanderson/kdx), pinned to
+`9807f42efeb565df8b92741074fdcd625bb24d16`; see its
+[MIT notice](Notices/KDX-MIT.txt). The Swift Twofish implementation adapts
+RustCrypto's algorithm; see its [MIT notice](Notices/RustCrypto-MIT.txt).
+Both notices are included in app bundles.
+
+The original Haxial programs, appearance assets, and complete challenge table
+are not included in the repository. Appearance data is imported locally at build
+time; the original programs are never launched by the importer.
