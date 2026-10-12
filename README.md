@@ -15,6 +15,8 @@ The first bundled-theme build needs the original KDX Client 1.600 application or
 
 ## Original KDX interface
 
+KDX Client and KDX Classic use the liquid glass icon in `Resources/AppIcon/AppIcon.png`. The build bundles `Resources/AppIcon/AppIcon.icns`, which contains all standard macOS icon sizes from 16 to 1024 pixels.
+
 **KDX Client.app now starts in AppKit**, using the original KDX appearance renderer. It provides multiple server sessions, custom window chrome and an internal minimized-window dock, connection/address book, trackers, chat/users, files, and a per-server transfer queue. All 16 original themes, artwork and fonts are bundled as decoded data, with **Mach Lavender** selected on first launch. Choose another theme or import a custom `.hap` through **KDX Client → Appearances…**. No import is required to use the original themes. See [appearance setup, evidence, limitations, and verification](docs/CLASSIC.md). Visual fidelity remains provisional.
 
 **KDX Client uses only the custom AppKit interface.** News and advanced remote administration await custom views; their core protocol and server support remain implemented. The optional **KDX Classic.app** exposes the same interface and shares its appearances, address book and layout preferences with KDX Client.

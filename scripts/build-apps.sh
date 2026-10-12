@@ -21,7 +21,10 @@ for product in KDXClient KDXServer KDXClassic; do
     cp "$bin_path/$product" "$bundle/Contents/MacOS/.$product.new"
     mv -f "$bundle/Contents/MacOS/.$product.new" "$bundle/Contents/MacOS/$product"
     cp Notices/*.txt "$bundle/Contents/Resources/Notices/"
+    icon_plist=""
     if [[ "$product" != KDXServer ]]; then
+        cp Resources/AppIcon/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
+        icon_plist='<key>CFBundleIconFile</key><string>AppIcon.icns</string>'
         cp "$appearance_catalog" "$bundle/Contents/Resources/OriginalAppearances.json"
         "$bin_path/KDXAppearanceTool" verify "$bundle/Contents/Resources/OriginalAppearances.json"
     fi
@@ -33,6 +36,7 @@ for product in KDXClient KDXServer KDXClassic; do
 <key>CFBundleIdentifier</key><string>org.macos-kdx.$product</string>
 <key>CFBundleName</key><string>$title</string>
 <key>CFBundleDisplayName</key><string>$title</string>
+$icon_plist
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
