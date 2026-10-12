@@ -154,6 +154,8 @@ import AppKit
         let rect = preferences.frame(key: key, fallback: fallback, screens: NSScreen.screens.map(\.visibleFrame),minimumSize:minimumFrameSize)
         let window = ClassicWindow(contentRect: rect, styleMask: [.borderless,.resizable], backing: .buffered, defer: true)
         super.init(window: window)
+        // Position is restored explicitly; AppKit must not cascade it on display.
+        shouldCascadeWindows = false
         window.isReleasedWhenClosed = false; window.hasShadow = true; window.minSize = NSSize(width: min(size.width,320), height: min(size.height,180))
         window.delegate = self; window.contentView = chrome; chrome.controller = self; self.title = title
         windowMenu.addItem(menuItem("Save Window Location/Size") { [weak self] in self?.saveFrame() })

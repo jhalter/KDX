@@ -153,7 +153,7 @@ enum ClassicBarAction: CaseIterable {
     init(title: String, compact: Bool, preferences: ClassicPreferences) {
         self.compact = compact
         let size = ClassicButtonBarView.referenceSize(compact:compact)
-        super.init(title:title,key:compact ? "button-bar.compact" : "button-bar",size:NSSize(width:size.width+12,height:size.height+28),preferences:preferences)
+        super.init(title:title,key:compact ? "button-bar.compact" : "button-bar",size:NSSize(width:size.width+12,height:size.height+28),preferences:preferences,minimumFrameSize:NSSize(width:1,height:1))
         window?.level = .floating; chrome.allowsResize = false
         if let maximize = windowMenu.item(withTitle:"Maximize / Restore") { windowMenu.removeItem(maximize) }
         fitBar()
@@ -168,6 +168,6 @@ enum ClassicBarAction: CaseIterable {
         let size = NSSize(width:reference.width+probe.width-content.width,height:reference.height+probe.height-content.height)
         window.minSize = .zero; window.maxSize = size; window.minSize = size
         let old = window.frame, frame = NSRect(x:old.minX,y:old.maxY-size.height,width:size.width,height:size.height)
-        window.setFrame(ClassicPreferences.constrain(frame,to:NSScreen.screens.map(\.visibleFrame),fallback:frame),display:false)
+        window.setFrame(ClassicPreferences.constrain(frame,to:NSScreen.screens.map(\.visibleFrame),fallback:frame,minimumSize:NSSize(width:1,height:1)),display:false)
     }
 }

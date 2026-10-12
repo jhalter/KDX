@@ -64,8 +64,10 @@ public struct ClassicEndpoint: Codable, Equatable, Identifiable, Sendable {
         return Self.constrain(frame, to: screens, fallback: fallback,minimumSize:minimumSize)
     }
     public static func constrain(_ frame: NSRect, to screens: [NSRect], fallback: NSRect, minimumSize: NSSize = NSSize(width:180,height:60)) -> NSRect {
-        guard let screen = screens.max(by: { $0.intersection(frame).area < $1.intersection(frame).area }) else { return fallback }
-        guard [frame.minX,frame.minY,frame.width,frame.height].allSatisfy(\.isFinite), frame.width >= minimumSize.width, frame.height >= minimumSize.height else { return fallback.intersection(screen) }
+        let valid = [frame.minX,frame.minY,frame.width,frame.height].allSatisfy(\.isFinite) && frame.width >= minimumSize.width && frame.height >= minimumSize.height
+        // An unavailable display list is not evidence that a saved frame is bad.
+        guard let screen = screens.max(by: { $0.intersection(frame).area < $1.intersection(frame).area }) else { return valid ? frame : fallback }
+        guard valid else { return fallback.intersection(screen) }
         let width = min(frame.width, screen.width), height = min(frame.height, screen.height)
         return NSRect(x: max(screen.minX, min(frame.minX, screen.maxX-width)), y: max(screen.minY, min(frame.minY, screen.maxY-height)), width: width, height: height)
     }
