@@ -12,7 +12,8 @@ Set KDX_TEST_TABLE to an original challenge table or KDX_TEST_ARCHIVE to its
 original archive, or import a table through either app first.
 Account credentials, if needed, use KDX_TEST_SERVER_LOGIN and
 KDX_TEST_SERVER_PASSWORD. Keep passwords out of command history and files.
-See docs/INTEROPERABILITY.md for the scope and remaining manual checks.
+These gates verify TCP connectivity, server login, and tracker queries.
+They do not establish full file-transfer or UI interoperability.
 USAGE
     exit 2
 fi

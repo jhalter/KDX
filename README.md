@@ -21,11 +21,6 @@ and server support but still need client views. Visual fidelity and full
 interoperability with legacy peers remain unverified. KDX preserves its historical
 SHA-1/Twofish protocol and does not provide modern authenticated transport security.
 
-See the [October protocol update](docs/UPSTREAM-UPDATE.md) for the latest changes,
-the [implementation status](docs/STATUS.md) for supported features and remaining
-work, and the [interoperability checklist](docs/INTEROPERABILITY.md) for verification
-limits.
-
 ## Requirements
 
 - **Platform:** macOS Tahoe 26 or macOS Golden Gate 27.
@@ -57,7 +52,7 @@ You can also open `Package.swift` in Xcode to work on the source.
 
 1. Open KDX Client or KDX Server. The bundled challenge table is used automatically.
    Existing manually imported tables take precedence. Import/download commands
-   remain available for development builds and recovery; see [table setup](docs/TABLE-IMPORT.md).
+   remain available for development builds and recovery.
 2. To host, open KDX Server. Its window menu (also available as the macOS
    **Server** menu) provides **Settings** for administrator credentials and port,
    **Server Settings…** for name/shared folder/guests, **Accounts…**, and
@@ -67,8 +62,6 @@ You can also open `Package.swift` in Xcode to work on the source.
    leave login and password blank for guest access.
 4. Use the floating bar for chat, users, messages, files, and transfers. Choose a
    theme under **KDX Client → Appearances…**.
-
-See the [client guide](docs/CLIENT.md#use) and [server guide](docs/SERVER-UI.md) for controls and workflows.
 
 ## Tests
 
@@ -89,11 +82,11 @@ To include the local TCP test in an environment that permits listeners:
 KDX_TEST_TCP=1 scripts/test.sh
 ```
 
-See the [live verification instructions](docs/INTEROPERABILITY.md) for testing
-against independent servers and trackers. Passing the default suite does not
-establish live interoperability.
+Use `scripts/verify-interop.sh` to test against explicitly selected independent
+servers and trackers; running it without configuration prints setup instructions.
+Passing the default suite does not establish live interoperability.
 
-## Code and documentation
+## Repository layout
 
 | Path | Contents |
 | --- | --- |
@@ -104,7 +97,6 @@ establish live interoperability.
 | `Sources/KDXAppearanceTool/` | Appearance extraction and validation |
 | `Tests/` | Protocol fixtures, integration tests, and UI tests |
 | `scripts/` | Build, test, and interoperability commands |
-| `docs/` | Setup guides, protocol evidence, and implementation status |
 
 ## Software updates and releases
 

@@ -4,3 +4,6 @@ dist/
 .DS_Store
 *.bin
 !Tests/KDXCoreTests/Fixtures/*.bin
+
+# Local development notes are not published.
+/docs/

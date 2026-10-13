@@ -1,6 +1,6 @@
 import Foundation
 
-/// Tracker 1.110 records derived from static inspection; see docs/TRACKER-PROTOCOL.md.
+/// Tracker 1.110 records derived from static inspection.
 public struct TrackerGroup: Identifiable, Equatable, Sendable {
     public let id: Int
     public let serverCount: UInt16

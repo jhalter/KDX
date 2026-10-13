@@ -1,7 +1,6 @@
 import AppKit
 
 /// HAP v1 contains data-only indexed raster records, not drawing bytecode.
-/// See docs/HAP-FORMAT.md for the original decoder and stretch routine addresses.
 public struct HAPArtwork: Codable, Equatable, Sendable {
     public let skins: Data
     public let icons: Data

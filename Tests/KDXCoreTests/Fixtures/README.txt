@@ -53,7 +53,7 @@ The password is the public lab-only value 'lab-only-pw!1'.
 
 HistoryTests also uses the existing linux-chat-admin-37484 and
 linux-server-settings-45150 streams for independent 181 history snapshots
-and 183 live updates. The inferred record layout is in docs/HISTORY-PROTOCOL.md.
+and 183 live updates.
 
 synthetic-table-import.zip and synthetic-table-descriptor.zip are authored
 test data created with Python's standard zipfile module, not captured Haxial
