@@ -1,7 +1,8 @@
 import AppKit
 
 @MainActor final class ClassicWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
+    weak var modalChild: NSWindow?
+    override var canBecomeKey: Bool { modalChild == nil }
     override var canBecomeMain: Bool { true }
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         let previous = firstResponder as? NSView
@@ -142,6 +143,9 @@ import AppKit
     private var closing = false
     private var tasks: [String: Task<Void, Never>] = [:]
     private var activeDialog: ClassicDialogController?
+    private(set) var ownedDialog: ClassicWindowController?
+    private var dialogEventMonitor: Any?
+    private weak var dialogPreviousResponder: NSResponder?
     private lazy var dialogQueue: ClassicDialogQueue = {
         let queue = ClassicDialogQueue()
         queue.changed = { [weak self] in self?.presentNextDialog() }
@@ -164,6 +168,9 @@ import AppKit
         windowMenu.addItem(menuItem("Close Window", key: "w") { [weak self] in self?.requestClose() })
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    isolated deinit {
+        if let monitor = dialogEventMonitor { NSEvent.removeMonitor(monitor) }
+    }
     func install(_ view: NSView) {
         chrome.content.subviews.forEach { $0.removeFromSuperview() }
         // Establish the themed content bounds before child controls lay out.
@@ -179,7 +186,7 @@ import AppKit
             dialogQueue = ClassicDialogQueue()
             dialogQueue.changed = { [weak self] in self?.presentNextDialog() }
         }
-        showWindow(nil); window?.makeKeyAndOrderFront(nil)
+        showWindow(nil); (ownedDialog?.window ?? window)?.makeKeyAndOrderFront(nil)
     }
     func run(_ key: String = "operation", operation: @escaping @MainActor () async throws -> Void) {
         tasks[key]?.cancel()
@@ -205,23 +212,69 @@ import AppKit
         guard !closing, window != nil else { request.resolve(nil); return }
         dialogQueue.enqueue(request)
     }
+    // AppKit sheets add a rounded system frame even to borderless windows.
+    // Use a square themed child window, with input blocked only for its owner.
+    @discardableResult func presentOwnedDialog(_ dialog: ClassicWindowController) -> Bool {
+        guard !closing, ownedDialog == nil, let parent = window as? ClassicWindow, parent.attachedSheet == nil,
+              let child = dialog.window else { return false }
+        dialogPreviousResponder = parent.firstResponder
+        _ = parent.makeFirstResponder(nil)
+        ownedDialog = dialog; parent.modalChild = child
+        let frame = NSRect(x:parent.frame.midX-child.frame.width/2,
+                           y:parent.frame.midY-child.frame.height/2,
+                           width:child.frame.width,height:child.frame.height)
+        child.setFrame(ClassicPreferences.constrain(frame,to:NSScreen.screens.map(\.visibleFrame),fallback:frame),display:false)
+        child.contentView?.layoutSubtreeIfNeeded()
+        showOwnedDialogWindow(child)
+        return true
+    }
+    func dismissOwnedDialog(_ dialog: ClassicWindowController, completion: () -> Void = {}) {
+        if ownedDialog === dialog {
+            ownedDialog = nil; (window as? ClassicWindow)?.modalChild = nil
+            if let child = dialog.window { hideOwnedDialogWindow(child) }
+        }
+        completion()
+        presentNextDialog()
+    }
+    // Presentation is kept separate so lifecycle tests never display windows.
+    func showOwnedDialogWindow(_ child: NSWindow) {
+        window?.addChildWindow(child,ordered:.above)
+        dialogEventMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.leftMouseUp,.leftMouseDragged,
+            .rightMouseDown,.rightMouseUp,.rightMouseDragged,.otherMouseDown,.otherMouseUp,.otherMouseDragged,
+            .keyDown,.keyUp,.flagsChanged,.scrollWheel,.magnify,.rotate,.swipe,.pressure]) { [weak self] event in
+            guard let self, event.window === self.window, let child = self.ownedDialog?.window else { return event }
+            child.makeKeyAndOrderFront(nil)
+            return nil
+        }
+        child.makeKeyAndOrderFront(nil)
+    }
+    func hideOwnedDialogWindow(_ child: NSWindow) {
+        if let monitor = dialogEventMonitor { NSEvent.removeMonitor(monitor); dialogEventMonitor = nil }
+        let restoreFocus = child.isKeyWindow
+        window?.removeChildWindow(child); child.orderOut(nil)
+        if !closing {
+            if let responder = dialogPreviousResponder { window?.makeFirstResponder(responder) }
+            if restoreFocus { window?.makeKeyAndOrderFront(nil) }
+        }
+        dialogPreviousResponder = nil
+    }
     private func presentNextDialog() {
-        guard !closing, activeDialog == nil, let request = dialogQueue.active, let parent = window else { return }
+        guard !closing, activeDialog == nil, ownedDialog == nil, window?.attachedSheet == nil, let request = dialogQueue.active else { return }
         let dialog = ClassicDialogController(request:request,preferences:preferences)
-        guard let sheet = dialog.window else { dialogQueue.complete(id:request.id,values:nil); return }
         activeDialog = dialog
-        dialog.responseRequested = { [weak dialog] accepted in
-            guard let sheet = dialog?.window else { return }
-            sheet.sheetParent?.endSheet(sheet,returnCode:accepted ? .OK : .cancel)
-        }
-        parent.beginSheet(sheet) { [weak self, weak dialog] response in
+        dialog.responseRequested = { [weak self, weak dialog] accepted in
             guard let self, let dialog, self.activeDialog === dialog else { return }
-            let values = response == .OK && !self.closing ? dialog.form.values : nil
-            dialog.form.clearSensitiveValues(); sheet.orderOut(nil)
-            self.activeDialog = nil
-            self.dialogQueue.complete(id:request.id,values:values)
+            let values = accepted && !self.closing ? dialog.form.values : nil
+            dialog.form.clearSensitiveValues()
+            self.dismissOwnedDialog(dialog) {
+                self.activeDialog = nil
+                self.dialogQueue.complete(id:request.id,values:values)
+            }
         }
-        sheet.makeFirstResponder(dialog.form.firstEditor ?? dialog.form.accept)
+        guard presentOwnedDialog(dialog) else {
+            activeDialog = nil; dialogQueue.complete(id:request.id,values:nil); return
+        }
+        dialog.window?.makeFirstResponder(dialog.form.firstEditor ?? dialog.form.accept)
         dialog.form.firstEditor?.selectText(nil)
     }
     func requestClose() {
@@ -240,9 +293,10 @@ import AppKit
         closing = true
         let dialog = activeDialog; activeDialog = nil
         dialogQueue.invalidate(); dialog?.form.clearSensitiveValues()
-        if let sheet = dialog?.window { sheet.sheetParent?.endSheet(sheet,returnCode:.cancel); sheet.orderOut(nil) }
+        if let child = ownedDialog { dismissOwnedDialog(child) { child.requestClose() } }
         saveFrame(); observation.stop(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); onClosed?()
     }
+    func windowDidEndSheet(_ notification: Notification) { presentNextDialog() }
     func windowDidBecomeKey(_ notification: Notification) { chrome.refreshAppearance(); onFocus?() }
     func windowDidResignKey(_ notification: Notification) { chrome.refreshAppearance(); onBlur?() }
     func windowDidMove(_ notification: Notification) { saveFrame() }

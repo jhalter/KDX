@@ -46,6 +46,84 @@ final class ClassicDialogTests: XCTestCase {
         queue.complete(id:third.id,values:[:]); XCTAssertEqual(order,["first","second","third"])
     }
 
+    @MainActor private final class HeadlessOwner: ClassicWindowController {
+        var shown: [NSWindow] = [], hidden: [NSWindow] = []
+        override func showOwnedDialogWindow(_ child: NSWindow) { shown.append(child) }
+        override func hideOwnedDialogWindow(_ child: NSWindow) { hidden.append(child) }
+    }
+
+    @MainActor func testSquareDialogsBlockOnlyTheirOwnerAndKeepQueueOrder() throws {
+        _ = NSApplication.shared
+        let suite = "KDX-dialog-owner-tests-"+UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName:suite))
+        defer { defaults.removePersistentDomain(forName:suite) }
+        let preferences = ClassicPreferences(root:FileManager.default.temporaryDirectory,defaults:defaults)
+        let owner = HeadlessOwner(title:"Chat",key:"test",size:NSSize(width:600,height:400),preferences:preferences)
+        let other = HeadlessOwner(title:"Other server",key:"other",size:NSSize(width:600,height:400),preferences:preferences)
+        let parent = try XCTUnwrap(owner.window as? ClassicWindow)
+        var topics: [String] = [], confirmations: [Bool] = []
+        owner.prompt("Chat Topic",initial:"Old") { topics.append($0) }
+        owner.confirm("Confirm",message:"Continue?",acceptTitle:"OK") { confirmations.append($0) }
+        let topic = try XCTUnwrap(owner.ownedDialog as? ClassicDialogController)
+        let child = try XCTUnwrap(topic.window)
+        XCTAssertEqual(child.styleMask,.borderless)
+        XCTAssertNil(child.sheetParent); XCTAssertNil(parent.attachedSheet)
+        XCTAssertTrue(parent.modalChild === child)
+        XCTAssertFalse(parent.canBecomeKey); XCTAssertTrue(try XCTUnwrap(other.window).canBecomeKey)
+        XCTAssertEqual(owner.shown.count,1)
+        XCTAssertEqual(child.frame.midX,parent.frame.midX,accuracy:1)
+        topic.form.fields["value"]?.stringValue = "New"
+        topic.requestResponse(true); topic.requestResponse(false)
+        XCTAssertEqual(topics,["New"]); XCTAssertEqual(owner.hidden.count,1)
+        XCTAssertEqual(owner.shown.count,2)
+        let confirmation = try XCTUnwrap(owner.ownedDialog as? ClassicDialogController)
+        XCTAssertFalse(confirmation === topic); XCTAssertFalse(parent.canBecomeKey)
+        confirmation.requestClose()
+        XCTAssertEqual(confirmations,[false]); XCTAssertNil(owner.ownedDialog)
+        XCTAssertNil(parent.modalChild); XCTAssertTrue(parent.canBecomeKey)
+        XCTAssertFalse(parent.isVisible); XCTAssertTrue(owner.shown.allSatisfy { !$0.isVisible })
+    }
+
+    @MainActor func testClosingOwnerCancelsChildAndQueuedRequestsWithoutPresentingMore() throws {
+        _ = NSApplication.shared
+        let suite = "KDX-dialog-owner-tests-"+UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName:suite))
+        defer { defaults.removePersistentDomain(forName:suite) }
+        let preferences = ClassicPreferences(root:FileManager.default.temporaryDirectory,defaults:defaults)
+        let owner = HeadlessOwner(title:"Chat",key:"test",size:NSSize(width:600,height:400),preferences:preferences)
+        var results: [Bool] = []
+        owner.presentDialog(ClassicDialogRequest(title:"Password",fields:[ClassicDialogField(id:"password",label:"Password",value:"secret",secure:true)]) { results.append($0 != nil) })
+        owner.presentDialog(ClassicDialogRequest(title:"Next") { results.append($0 != nil) })
+        let dialog = try XCTUnwrap(owner.ownedDialog as? ClassicDialogController)
+        owner.windowWillClose(Notification(name:NSWindow.willCloseNotification,object:owner.window))
+        dialog.requestResponse(true)
+        XCTAssertEqual(results,[false,false]); XCTAssertEqual(owner.shown.count,1)
+        XCTAssertEqual(owner.hidden.count,1); XCTAssertNil(owner.ownedDialog)
+        XCTAssertNil((owner.window as? ClassicWindow)?.modalChild)
+        XCTAssertEqual(dialog.form.fields["password"]?.stringValue,"")
+        owner.showMessage("Too late"); XCTAssertEqual(owner.shown.count,1)
+    }
+
+    @MainActor func testOtherOwnedDialogsDeferQueuedPrompts() throws {
+        _ = NSApplication.shared
+        let suite = "KDX-dialog-owner-tests-"+UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName:suite))
+        defer { defaults.removePersistentDomain(forName:suite) }
+        let preferences = ClassicPreferences(root:FileManager.default.temporaryDirectory,defaults:defaults)
+        let owner = HeadlessOwner(title:"Profile",key:"test",size:NSSize(width:600,height:400),preferences:preferences)
+        let chooser = ClassicColorChooserWindow(rgb:0x123456,preferences:preferences)
+        XCTAssertTrue(owner.presentOwnedDialog(chooser))
+        owner.showMessage("Queued error")
+        XCTAssertTrue(owner.ownedDialog === chooser); XCTAssertEqual(owner.shown.count,1)
+        XCTAssertFalse(owner.presentOwnedDialog(chooser))
+        owner.dismissOwnedDialog(chooser)
+        XCTAssertEqual(owner.shown.count,2)
+        let message = try XCTUnwrap(owner.ownedDialog as? ClassicDialogController)
+        XCTAssertEqual(message.form.message.stringValue,"Queued error")
+        message.requestClose(); XCTAssertNil(owner.ownedDialog)
+        XCTAssertTrue(try XCTUnwrap(owner.window).canBecomeKey)
+    }
+
     @MainActor func testNativeFormFieldsActionsAndBoundedMessageLayout() throws {
         _ = NSApplication.shared
         let request = ClassicDialogRequest(title:"Reconnect",message:String(repeating:"A long server message wraps and remains selectable.\n",count:100),fields:[
@@ -133,7 +211,7 @@ final class ClassicDialogTests: XCTestCase {
         var accepted: [Bool] = []
         dialog.responseRequested = { accepted.append($0) }
         dialog.requestResponse(true); dialog.requestClose(); dialog.requestResponse(true)
-        XCTAssertEqual(accepted,[true],"Duplicate button/close events must not end a sheet twice.")
+        XCTAssertEqual(accepted,[true],"Duplicate button/close events must not complete a dialog twice.")
         dialog.form.clearSensitiveValues(); dialog.saveFrame()
         XCTAssertNil(defaults.object(forKey:"frame.dialog"))
         XCTAssertEqual(dialog.form.fields["password"]?.stringValue,"")

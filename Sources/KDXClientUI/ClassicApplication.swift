@@ -103,7 +103,7 @@ import KDXCore
     var activeController: ClassicWindowController? { NSApplication.shared.keyWindow?.windowController as? ClassicWindowController }
     private func confirmationOwner() -> ClassicWindowController? {
         var parent = NSApplication.shared.keyWindow
-        while let sheetParent = parent?.sheetParent { parent = sheetParent }
+        while let owner = parent?.sheetParent ?? parent?.parent { parent = owner }
         if let controller = parent?.windowController as? ClassicWindowController { return controller }
         guard let bar else { return nil }
         restore(bar); return bar

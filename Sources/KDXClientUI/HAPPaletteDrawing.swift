@@ -55,7 +55,7 @@ import AppKit
             // A palette-only import or older catalog may lack the corner asset.
             // Keep a minimal visible default marker until the app is reimported.
             style.color(53).setStroke()
-            let path = NSBezierPath(roundedRect:rect.insetBy(dx:1.5,dy:1.5),xRadius:3.5,yRadius:3.5)
+            let path = NSBezierPath(rect:rect.insetBy(dx:1.5,dy:1.5))
             path.lineWidth = 3; path.stroke()
         }
         for (row,slot) in [53,50,51].enumerated() {

@@ -188,19 +188,18 @@ import UniformTypeIdentifiers
         chooser.responseRequested = { [weak self, weak chooser] accepted in
             guard let self, let chooser, colorChooser === chooser else { return }
             colorChooser = nil
-            if let sheet = chooser.window, let parent = sheet.sheetParent {
-                parent.endSheet(sheet,returnCode:accepted ? .OK : .cancel); sheet.orderOut(nil)
+            dismissOwnedDialog(chooser) {
+                if accepted, isCurrentConnection, session.client.isConnected, !isApplying { form.setColor(chooser.form.value.rgb,background:background) }
+                refresh()
             }
-            if accepted, isCurrentConnection, session.client.isConnected, !isApplying { form.setColor(chooser.form.value.rgb,background:background) }
-            refresh()
         }
         refresh(); return chooser
     }
     private func chooseColor(background: Bool) {
-        guard let parent = window, parent.attachedSheet == nil,
-              let chooser = makeColorChooser(background:background), let sheet = chooser.window else { return }
-        parent.beginSheet(sheet) { [weak chooser] _ in chooser?.requestResponse(false) }
-        sheet.makeFirstResponder(chooser.form.hexadecimal); chooser.form.hexadecimal.selectText(nil)
+        guard window?.attachedSheet == nil, ownedDialog == nil,
+              let chooser = makeColorChooser(background:background) else { return }
+        guard presentOwnedDialog(chooser) else { chooser.requestResponse(false); return }
+        chooser.window?.makeFirstResponder(chooser.form.hexadecimal); chooser.form.hexadecimal.selectText(nil)
     }
     private func chooseImage() {
         guard let window, isCurrentConnection, !isApplying else { return }
@@ -218,7 +217,7 @@ import UniformTypeIdentifiers
     }
     override func applyStyle() { super.applyStyle(); form.applyStyle(); colorChooser?.applyStyle(); fitForm() }
     override func windowWillClose(_ notification: Notification) {
-        colorChooser?.requestResponse(false); super.windowWillClose(notification)
+        super.windowWillClose(notification); colorChooser?.requestResponse(false)
     }
     override func maximize() { fitForm() }
     private func fitForm() {
