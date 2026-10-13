@@ -38,6 +38,11 @@ public struct ClassicEndpoint: Codable, Equatable, Identifiable, Sendable {
         self.defaults = defaults ?? UserDefaults(suiteName: Self.suite) ?? .standard
         self.root = root ?? (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)).appendingPathComponent("KDX Classic", isDirectory: true)
     }
+    /// Default display name for new server connections; account logins remain per endpoint.
+    public var nickname: String {
+        get { defaults.string(forKey:"nickname") ?? "Guest" }
+        set { defaults.set(newValue,forKey:"nickname") }
+    }
     public var appearanceID: String? { get { defaults.string(forKey: "appearance") } set { defaults.set(newValue, forKey: "appearance") } }
     public var smallButtonBar: Bool { get { defaults.bool(forKey:"smallButtonBar") } set { defaults.set(newValue,forKey:"smallButtonBar") } }
     public var smallUserIcons: Bool {
@@ -87,7 +92,7 @@ public struct ClassicWindowKey: Hashable, Sendable {
 
 @Observable @MainActor public final class ClassicSession {
     public let id = UUID()
-    public let endpoint: ClassicEndpoint
+    public private(set) var endpoint: ClassicEndpoint
     public let client: KDXClient
     public let transfers: ClassicTransferQueue
     public var error: String?
@@ -100,6 +105,10 @@ public struct ClassicWindowKey: Hashable, Sendable {
     public init(endpoint: ClassicEndpoint, client: KDXClient? = nil) {
         self.endpoint = endpoint; self.client = client ?? KDXClient()
         self.transfers = ClassicTransferQueue(client: self.client)
+    }
+    func rememberNickname(_ nickname: String, preferences: ClassicPreferences) {
+        endpoint.nickname = nickname
+        preferences.nickname = nickname
     }
     public func connect(password: String, table: ChallengeTable) {
         connectionTask?.cancel(); client.disconnect()

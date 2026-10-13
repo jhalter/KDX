@@ -115,7 +115,10 @@ import KDXCore
     let form: ClassicConnectForm
     var submitted: ((ClassicEndpoint,String) throws -> Void)?
     init(endpoint: ClassicEndpoint, saving: Bool, preferences: ClassicPreferences) {
-        form = ClassicConnectForm(endpoint:endpoint,saving:saving)
+        var initial = endpoint
+        // Keep explicit address-book aliases; replace the old Guest default.
+        if initial.nickname == "Guest" { initial.nickname = preferences.nickname }
+        form = ClassicConnectForm(endpoint:initial,saving:saving)
         super.init(title:saving ? "Address Book Item" : "KDX Connect",key:"connect",size:NSSize(width:402,height:220),preferences:preferences)
         form.setOptionsVisible(preferences.defaults.bool(forKey:"connect.options"))
         form.optionsChanged = { [weak self] in
@@ -127,6 +130,7 @@ import KDXCore
             do {
                 let endpoint = try form.endpoint()
                 try submitted?(endpoint,form.password.stringValue)
+                if !saving, !endpoint.tracker { preferences.nickname = endpoint.nickname }
                 form.clearPassword(); requestClose()
             } catch { showError(error) }
         }

@@ -76,6 +76,54 @@ final class ClassicConnectTests: XCTestCase {
         form.cancelOperation(nil); XCTAssertEqual(canceled,1)
     }
 
+    @MainActor func testSubmittedNicknameIsRestoredInNewConnectionsAndPreferences() throws {
+        _ = NSApplication.shared
+        let suite = "KDX-connect-name-"+UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName:suite))
+        defer { defaults.removePersistentDomain(forName:suite) }
+        let preferences = ClassicPreferences(root:FileManager.default.temporaryDirectory,defaults:defaults)
+        XCTAssertEqual(preferences.nickname,"Guest")
+        var endpoint = ClassicEndpoint(); endpoint.host = "server.example"
+        let window = ClassicConnectWindow(endpoint:endpoint,saving:false,preferences:preferences)
+        window.form.nickname.stringValue = "Chosen Name"
+        window.form.login.stringValue = "server-account"; window.form.password.stringValue = "test-password"
+        var submitted: ClassicEndpoint?
+        window.submitted = { value,_ in submitted = value }
+        window.form.submit.performClick(nil)
+        XCTAssertEqual(submitted?.nickname,"Chosen Name")
+        let reloaded = ClassicPreferences(root:preferences.root,defaults:try XCTUnwrap(UserDefaults(suiteName:suite)))
+        XCTAssertEqual(reloaded.nickname,"Chosen Name")
+        let fresh = ClassicConnectWindow(endpoint:ClassicEndpoint(),saving:false,preferences:reloaded)
+        XCTAssertEqual(fresh.form.nickname.stringValue,"Chosen Name")
+        XCTAssertEqual(fresh.form.login.stringValue,""); XCTAssertEqual(fresh.form.password.stringValue,"")
+        XCTAssertFalse(defaults.persistentDomain(forName:suite)?.values.contains { ($0 as? String) == "test-password" } ?? false)
+        let tracker = ClassicConnectWindow(endpoint:.defaultTracker,saving:false,preferences:reloaded)
+        tracker.form.type.selectItem(at:0); tracker.form.type.sendAction(tracker.form.type.action,to:tracker.form.type.target)
+        XCTAssertEqual(tracker.form.nickname.stringValue,"Chosen Name")
+        XCTAssertFalse(try XCTUnwrap(fresh.window).isVisible)
+    }
+
+    @MainActor func testCancelTrackerAndAddressBookEditingDoNotReplacePreferredNickname() throws {
+        _ = NSApplication.shared
+        let suite = "KDX-connect-name-"+UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName:suite))
+        defer { defaults.removePersistentDomain(forName:suite) }
+        let preferences = ClassicPreferences(root:FileManager.default.temporaryDirectory,defaults:defaults)
+        preferences.nickname = "Preferred"
+        var endpoint = ClassicEndpoint(); endpoint.host = "server.example"; endpoint.nickname = "Server Alias"
+        let canceled = ClassicConnectWindow(endpoint:endpoint,saving:false,preferences:preferences)
+        XCTAssertEqual(canceled.form.nickname.stringValue,"Server Alias")
+        canceled.form.nickname.stringValue = "Canceled"; canceled.form.cancel.performClick(nil)
+        XCTAssertEqual(preferences.nickname,"Preferred")
+        for (value,saving) in [(endpoint,true),(.defaultTracker,false)] {
+            let window = ClassicConnectWindow(endpoint:value,saving:saving,preferences:preferences)
+            window.form.nickname.stringValue = "Other"; window.submitted = { _,_ in }
+            window.form.submit.performClick(nil)
+            XCTAssertEqual(preferences.nickname,"Preferred")
+            XCTAssertFalse(try XCTUnwrap(window.window).isVisible)
+        }
+    }
+
     @MainActor func testOffscreenConnectFormsInOriginalAppearances() throws {
         guard let path = ProcessInfo.processInfo.environment["KDX_REFERENCE"] else { throw XCTSkip("Set KDX_REFERENCE for Connect rendering.") }
         let appearances = try ClassicAssetImporter.loadSync(URL(fileURLWithPath:path)).appearances

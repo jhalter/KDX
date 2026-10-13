@@ -139,14 +139,22 @@ final class ClassicProfileTests: XCTestCase {
         let applied = try await controller.applyProfile(); XCTAssertTrue(applied)
         XCTAssertEqual(first.client.currentUser?.nickname,"Account Name")
         XCTAssertEqual(controller.form.name.stringValue,"Account Name","Show the server's accepted identity after Apply.")
+        XCTAssertEqual(preferences.nickname,"Forbidden name","A server-enforced name must not replace the user's preferred name.")
+        XCTAssertEqual(first.endpoint.nickname,"Forbidden name")
+        XCTAssertEqual(second.endpoint.nickname,"Guest")
+        controller.form.info.string = "Another description"
+        _ = try await controller.applyProfile()
+        XCTAssertEqual(preferences.nickname,"Forbidden name","Editing other profile fields must not adopt a server-imposed nickname.")
         XCTAssertEqual(first.client.currentUser?.colors,[0x12,0x34,0x56,0xab,0xcd,0xef]); XCTAssertEqual(first.client.currentUser?.icon,icon)
-        XCTAssertEqual(first.client.currentUser?.flags,4); XCTAssertEqual(first.client.currentUser?.info,"Updated description")
+        XCTAssertEqual(first.client.currentUser?.flags,4); XCTAssertEqual(first.client.currentUser?.info,"Another description")
         XCTAssertEqual(second.client.currentUser?.colors,[0,0,0,0,0,0]); XCTAssertEqual(second.client.currentUser?.icon,[])
         controller.form.name.stringValue = ""; let invalid = controller.form.draft
         do { _ = try await controller.applyProfile(); XCTFail("Empty nickname should fail") } catch {}
         XCTAssertEqual(controller.form.draft,invalid); XCTAssertFalse(controller.isApplying)
+        XCTAssertEqual(preferences.nickname,"Forbidden name")
         controller.form.name.stringValue = "Unsaved"; controller.requestClose()
         XCTAssertEqual(first.client.currentUser?.nickname,"Account Name"); XCTAssertTrue(first.client.isConnected)
+        XCTAssertEqual(preferences.nickname,"Forbidden name")
         first.privateMessages.reset(); controller.refresh()
         XCTAssertFalse(controller.form.save.isEnabled); XCTAssertFalse(controller.form.name.isEnabled)
         do { _ = try await controller.applyProfile(); XCTFail("Stale connection should fail") } catch {}
@@ -178,6 +186,8 @@ final class ClassicProfileTests: XCTestCase {
         let shouldClose = try await operation.value
         XCTAssertFalse(shouldClose); XCTAssertEqual(controller.form.name.stringValue,"Newer draft")
         XCTAssertEqual(session.client.currentUser?.nickname,"Submitted")
+        XCTAssertEqual(session.endpoint.nickname,"Submitted")
+        XCTAssertEqual(controller.preferences.nickname,"Submitted")
         controller.form.name.stringValue = "Applied while closing"; gate.holdNext = true
         controller.submit(close:false)
         for _ in 0..<100 where !gate.waiting { try await Task.sleep(for:.milliseconds(5)) }
@@ -185,6 +195,10 @@ final class ClassicProfileTests: XCTestCase {
         for _ in 0..<100 where controller.isApplying { try await Task.sleep(for:.milliseconds(5)) }
         XCTAssertFalse(controller.isApplying); XCTAssertTrue(session.client.isConnected)
         XCTAssertEqual(session.client.currentUser?.nickname,"Applied while closing")
+        XCTAssertEqual(session.endpoint.nickname,"Applied while closing")
+        let reloaded = ClassicPreferences(root:controller.preferences.root,defaults:try XCTUnwrap(UserDefaults(suiteName:suite)))
+        let nextConnection = ClassicConnectWindow(endpoint:ClassicEndpoint(),saving:false,preferences:reloaded)
+        XCTAssertEqual(nextConnection.form.nickname.stringValue,"Applied while closing")
         XCTAssertFalse(try XCTUnwrap(controller.window).isVisible)
     }
 

@@ -168,12 +168,17 @@ import UniformTypeIdentifiers
         guard isCurrentConnection, session.client.isConnected else { throw KDXError.disconnected }
         guard !isApplying, colorChooser == nil else { return false }
         let captured = form.draft
+        let nicknameChanged = captured.nickname != session.client.currentUser?.nickname
         isApplying = true; refresh(); defer { isApplying = false; refresh() }
-        let session = session, generation = generation
+        let session = session, generation = generation, preferences = preferences
         // Finish the authenticated update independently of the window's lifetime.
         let operation = Task { @MainActor in
             guard generation == session.privateMessages.generation else { throw KDXError.disconnected }
             try await session.client.updateProfile(nickname:captured.nickname,info:captured.info,colors:captured.colors,icon:captured.icon,gradient:captured.gradient)
+            // Persist the user's choice, not a name imposed by this server.
+            if nicknameChanged, generation == session.privateMessages.generation {
+                session.rememberNickname(captured.nickname,preferences:preferences)
+            }
         }
         try await operation.value
         guard isCurrentConnection, captured == form.draft else { return false }
