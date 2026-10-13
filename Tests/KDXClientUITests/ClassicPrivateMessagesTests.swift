@@ -186,7 +186,7 @@ final class ClassicPrivateMessagesTests: XCTestCase {
         let preferences = ClassicPreferences(root:FileManager.default.temporaryDirectory,defaults:defaults)
         for vertical in [true,false] {
             let key = vertical ? "recipients" : "input"
-            let split = ClassicPrivateSplitView(vertical:vertical,key:key,preferences:preferences,portion:0.4,minimums:(80,60))
+            let split = ClassicPaneSplitView(vertical:vertical,key:key,preferences:preferences,portion:0.4,minimums:(80,60))
             split.addPane(NSView()); split.addPane(NSView())
             split.frame.size = NSSize(width:600,height:350)
             split.setPosition(vertical ? 250 : 180,ofDividerAt:0)
@@ -194,7 +194,7 @@ final class ClassicPrivateMessagesTests: XCTestCase {
             XCTAssertEqual(vertical ? split.subviews[0].frame.width : split.subviews[0].frame.height,vertical ? 250 : 180,accuracy:1)
             let saved = defaults.double(forKey:"split."+key)
             XCTAssertGreaterThan(saved,0.1); XCTAssertLessThan(saved,0.9)
-            let restored = ClassicPrivateSplitView(vertical:vertical,key:key,preferences:preferences,portion:0.2,minimums:(80,60))
+            let restored = ClassicPaneSplitView(vertical:vertical,key:key,preferences:preferences,portion:0.2,minimums:(80,60))
             restored.addPane(NSView()); restored.addPane(NSView())
             XCTAssertEqual(restored.portion,saved,accuracy:0.005)
             for size in [NSSize(width:450,height:210),NSSize(width:900,height:650)] {

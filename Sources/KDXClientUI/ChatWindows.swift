@@ -119,25 +119,43 @@ extension ClassicApplication {
     private init(session: ClassicSession, room: UInt32?, user: UInt32?, preferences: ClassicPreferences) {
         self.session = session; self.room = room; self.user = user
         members = ClassicList(columns:["Name","Description"],key:"chat-users",preferences:preferences,kind:.users)
-        super.init(title:"Chat — \(session.title)",key:room == nil ? "private-messages" : "chat",size:NSSize(width:800,height:490),preferences:preferences)
-        transcript.isEditable = false; transcript.isSelectable = true; transcript.isRichText = false; transcript.autoresizingMask = [.width]; transcript.font = ClassicStyle.shared.font
+        super.init(title:"Chat — \(session.title)",key:room == nil ? "private-messages" : "chat",size:NSSize(width:800,height:490),preferences:preferences,minimumFrameSize:NSSize(width:480,height:260))
+        transcript.isEditable = false; transcript.isSelectable = true
+        for editor in [transcript,input] {
+            editor.isRichText = false; editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false
+            editor.autoresizingMask = [.width]; editor.minSize = .zero
+            editor.maxSize = NSSize(width:CGFloat.greatestFiniteMagnitude,height:CGFloat.greatestFiniteMagnitude)
+            editor.textContainer?.widthTracksTextView = true
+        }
         let history = ClassicScrollView(); history.documentView = transcript; history.hasVerticalScroller = true
-        transcript.minSize = .zero; transcript.maxSize = NSSize(width:CGFloat.greatestFiniteMagnitude,height:CGFloat.greatestFiniteMagnitude); transcript.isVerticallyResizable = true; transcript.isHorizontallyResizable = false; transcript.textContainer?.widthTracksTextView = true
-        input.isRichText = false; input.font = ClassicStyle.shared.font; input.delegate = self; input.string = session.drafts[kind] ?? ""; input.send = { [weak self] in self?.sendText() }
-        input.isVerticallyResizable = true; input.textContainer?.widthTracksTextView = true
-        let entry = ClassicScrollView(); entry.documentView = input; entry.hasVerticalScroller = true; entry.heightAnchor.constraint(greaterThanOrEqualToConstant:48).isActive = true
-        let transcriptSplit = ClassicSplitView(); transcriptSplit.isVertical = false; transcriptSplit.addArrangedSubview(ClassicFieldFrame(history)); transcriptSplit.addArrangedSubview(ClassicFieldFrame(entry)); transcriptSplit.autosaveName = "org.macos-kdx.KDXClassic.chat-input"
-        history.heightAnchor.constraint(greaterThanOrEqualToConstant:130).isActive = true
-        let split = ClassicSplitView(); split.isVertical = true; split.addArrangedSubview(transcriptSplit)
-        if room != nil { split.addArrangedSubview(members); members.widthAnchor.constraint(greaterThanOrEqualToConstant:170).isActive = true }
-        transcriptSplit.widthAnchor.constraint(greaterThanOrEqualToConstant:260).isActive = true; split.autosaveName = "org.macos-kdx.KDXClassic.chat-users"
+        let entry = ClassicScrollView(); entry.documentView = input; entry.hasVerticalScroller = true
+        for scroll in [history,entry,members.scroll] {
+            scroll.automaticallyAdjustsContentInsets = false
+            scroll.contentInsets = .init(); scroll.scrollerInsets = .init()
+        }
+        input.delegate = self; input.string = session.drafts[kind] ?? ""; input.send = { [weak self] in self?.sendText() }
+        let conversation = ClassicPaneSplitView(vertical:false,key:"chat-input",preferences:preferences,portion:0.75,minimums:(136,54))
+        conversation.addPane(ClassicFieldFrame(history)); conversation.addPane(ClassicFieldFrame(entry))
+        let panes: NSView
+        if room != nil {
+            let split = ClassicPaneSplitView(vertical:true,key:"chat-users",preferences:preferences,portion:0.7,minimums:(260,170))
+            split.addPane(conversation); split.addPane(members); panes = split
+        } else { panes = conversation }
         send.invoke = { [weak self] in self?.sendText() }
         let topicButton = ClassicButton("Topic…") { [weak self] in guard let self, let room else { return }; prompt("Chat Topic",initial:session.client.chatTopics[room]?.text ?? "") { [weak self] text in self?.run("topic") { try await session.client.setTopic(text,room:room) } } }
         topicButton.isHidden = room == nil
         let invite = ClassicButton("Invite…") { [weak self] in self?.showInviteMenu() }; invite.isHidden = room == nil
         members.activate = { [weak self] row in if let id = UInt32(row.id) { self?.openPrivate?(id) } }
         let menu = ClassicMenu(title:""); menu.addItem(menuItem("Send Message") { [weak self] in if let id = self?.members.selected?.id, let value = UInt32(id) { self?.openPrivate?(value) } }); menu.addItem(menuItem("Invite Users To This Chat") { [weak self] in self?.showInviteMenu() }); members.table.menu = menu
-        install(classicColumn([split,classicRow([topicButton,invite,topic,send])]))
+        topic.lineBreakMode = .byTruncatingTail
+        topic.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        topic.setContentHuggingPriority(.defaultLow,for:.horizontal)
+        let actions = classicRow([topicButton,invite,topic,send]); actions.distribution = .fill
+        actions.heightAnchor.constraint(equalToConstant:24).isActive = true
+        panes.setContentHuggingPriority(.defaultLow,for:.vertical)
+        install(classicColumn([panes,actions]))
+        window?.minSize = NSSize(width:480,height:260)
+        window?.initialFirstResponder = input
         windowMenu.addItem(menuItem("Clear Text") { [weak self] in guard let self else { return }; self.clearedIDs.formUnion(self.lines.map(\.id)); self.refresh() })
         if let room { beforeClose = { if session.client.isConnected { try await session.client.leaveRoom(room) } } }
         observation.start { [weak self] in self?.refresh() }
