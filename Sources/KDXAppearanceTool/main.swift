@@ -5,7 +5,10 @@ import KDXClientUI
     static func main() async {
         do {
             let arguments = Array(CommandLine.arguments.dropFirst())
-            if arguments.count == 3, arguments[0] == "export-server" {
+            if arguments.count == 3, arguments[0] == "export-all" {
+                try ClassicOriginalAssets.export(from:URL(fileURLWithPath:arguments[1]),to:URL(fileURLWithPath:arguments[2]))
+                print("Exported 16 client themes, 16 server themes, artwork, fonts, and the verified challenge table.")
+            } else if arguments.count == 3, arguments[0] == "export-server" {
                 try ClassicServerReference.export(from:URL(fileURLWithPath:arguments[1]),to:URL(fileURLWithPath:arguments[2]))
                 print("Exported all 16 original server appearances with artwork and fonts.")
             } else if arguments.count == 3, arguments[0] == "export" {
@@ -15,7 +18,7 @@ import KDXClientUI
                 let appearances = try ClassicBundledAppearances.load(from:URL(fileURLWithPath:arguments[1]))
                 print("Verified \(appearances.count) bundled appearances.")
             } else {
-                throw AppearanceError.invalid("Usage: KDXAppearanceTool export ORIGINAL_APP_OR_ARCHIVE OUTPUT_JSON | export-server ORIGINAL_SERVER_APP_OR_EXE OUTPUT_JSON | verify CATALOG_JSON")
+                throw AppearanceError.invalid("Usage: KDXAppearanceTool export-all KDX_1.6_OSX_intel.7z OUTPUT_DIRECTORY | export ORIGINAL_APP_OR_ARCHIVE OUTPUT_JSON | export-server ORIGINAL_SERVER_APP_OR_EXE OUTPUT_JSON | verify CATALOG_JSON")
             }
         } catch {
             FileHandle.standardError.write(Data((error.localizedDescription+"\n").utf8))

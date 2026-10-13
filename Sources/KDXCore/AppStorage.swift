@@ -7,7 +7,14 @@ public enum KDXStorage {
         return root
     }
     public static func tableURL() throws -> URL { try directory().appendingPathComponent("challenge-table.bin") }
-    public static func loadTable() throws -> ChallengeTable { try ChallengeTable(file: tableURL()) }
+    public static func loadTable() throws -> ChallengeTable {
+        try loadTable(stored:tableURL(),bundled:Bundle.main.url(forResource:"challenge-table",withExtension:"bin"))
+    }
+    static func loadTable(stored: URL, bundled: URL?) throws -> ChallengeTable {
+        // Keep explicit imports authoritative; use the build's verified table on a fresh install.
+        let source = FileManager.default.fileExists(atPath:stored.path) ? stored : (bundled ?? stored)
+        return try ChallengeTable(file:source)
+    }
     public static func importTable(from file: URL) throws {
         let scoped = file.startAccessingSecurityScopedResource()
         defer { if scoped { file.stopAccessingSecurityScopedResource() } }

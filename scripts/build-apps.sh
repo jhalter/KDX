@@ -1,26 +1,19 @@
 #!/bin/bash
 set -euo pipefail
+if [[ $# -ne 1 || ! -f "$1" ]]; then
+    echo 'Usage: scripts/build-apps.sh /path/to/KDX_1.6_OSX_intel.7z' >&2
+    exit 1
+fi
+original_archive="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 cd "$(dirname "$0")/.."
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache"
 swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local
 bin_path=$(swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local --show-bin-path)
-appearance_catalog="$PWD/.build/OriginalAppearances.json"
-if [[ -n "${KDX_REFERENCE:-}" ]]; then
-    "$bin_path/KDXAppearanceTool" export "$KDX_REFERENCE" "$appearance_catalog"
-elif [[ ! -f "$appearance_catalog" ]]; then
-    echo 'Set KDX_REFERENCE to the original KDX Client 1.600 application or archive for the first bundled-theme build.' >&2
-    exit 1
-fi
-"$bin_path/KDXAppearanceTool" verify "$appearance_catalog"
-server_appearance_catalog="$PWD/.build/OriginalServerAppearances.json"
-if [[ -n "${KDX_SERVER_REFERENCE:-}" ]]; then
-    "$bin_path/KDXAppearanceTool" export-server "$KDX_SERVER_REFERENCE" "$server_appearance_catalog"
-elif [[ ! -f "$server_appearance_catalog" ]]; then
-    echo 'Set KDX_SERVER_REFERENCE to the original KDX Server 1.600 OSX app or executable for the first server-theme build.' >&2
-    exit 1
-fi
-"$bin_path/KDXAppearanceTool" verify "$server_appearance_catalog"
+assets="$PWD/.build/original-assets"
+"$bin_path/KDXAppearanceTool" export-all "$original_archive" "$assets"
+appearance_catalog="$assets/OriginalAppearances.json"
+server_appearance_catalog="$assets/OriginalServerAppearances.json"
 for product in KDXClient KDXServer; do
     case "$product" in KDXClient) title="KDX Client";; KDXServer) title="KDX Server";; esac
     bundle="dist/$title.app"
@@ -28,6 +21,7 @@ for product in KDXClient KDXServer; do
     # Replace the inode so rebuilding does not modify pages mapped by a running app.
     cp "$bin_path/$product" "$bundle/Contents/MacOS/.$product.new"
     mv -f "$bundle/Contents/MacOS/.$product.new" "$bundle/Contents/MacOS/$product"
+    cp "$assets/challenge-table.bin" "$bundle/Contents/Resources/challenge-table.bin"
     cp Notices/*.txt "$bundle/Contents/Resources/Notices/"
     if [[ "$product" == KDXServer ]]; then
         cp Resources/ServerIcon/ServerIcon.icns "$bundle/Contents/Resources/AppIcon.icns"

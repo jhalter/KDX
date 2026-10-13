@@ -43,6 +43,21 @@ public struct HAPChromeArtwork: Codable, Equatable, Sendable {
         horizontalSliderThumb = try reference.data(0x108dc8,112)
         try validate()
     }
+    /// Byte-identical to the PowerPC client's assets, at Windows executable offsets.
+    init(windowsClientReference b: AssetBytes) throws {
+        close = try b.data(0x1042e0,98); maximize = try b.data(0x104342,98)
+        minimize = try b.data(0x1043a4,98); menu = try b.data(0x104406,224)
+        resize = try b.data(0x104c64,153)
+        horizontalScrollGrip = try b.data(0x11a8a0,16); verticalScrollGrip = try b.data(0x11a8b0,16)
+        checkboxOff = try b.data(0x1046fc,98); checkboxOn = try b.data(0x10475e,98); checkboxMixed = try b.data(0x1047c0,98)
+        radioOff = try b.data(0x104822,98); radioOn = try b.data(0x104884,98); radioMixed = try b.data(0x1048e6,98)
+        defaultButtonCorners = try b.data(0x1046c0,60)
+        horizontalSliderThumb = try b.data(0x104566,112)
+        progress = try HAPProgressArtwork(digits:b.data(0x104950,100),complete:b.data(0x1049b4,16),caps:b.data(0x1049e8,40))
+        banner = try HAPBannerArtwork(palette:b.data(0xf8de4,800),pixels:b.data(0xf9104,6080))
+        wonderLight = try HAPWonderLightArtwork(palette:b.data(0x104ba4,64),pixels:b.data(0x104be4,128))
+        try validate()
+    }
     /// Same toolkit rasters in the verified Windows server shipped in the OSX wrapper.
     init(serverReference b: AssetBytes) throws {
         close = try b.data(0x84618,98); maximize = try b.data(0x8467a,98)

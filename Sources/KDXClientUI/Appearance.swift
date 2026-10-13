@@ -64,6 +64,7 @@ public struct AppearanceImport: Sendable {
 
 public enum AppearanceDecoder {
     public static let referenceSHA256 = "fb3876cd557c3a077f5cd3dbf1b0546d95de8cee7fb56f276b94aa6275fbca18"
+    public static let windowsReferenceSHA256 = "99d4a8f45c61fca1ee5753028de28479e040f43a08c507ccfcc23be92c20b983"
     static let referenceIconAtlasSHA256 = "a7e18bf724aece58b9fc39566c50c3f6d9bd2a142917ce35635f95623a7ebdfc"
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     /// RGB dictionary followed by one-byte palette indices (PPC routine 0x9F620).
@@ -105,10 +106,13 @@ public enum AppearanceDecoder {
         return AppearanceImport(appearances: [appearance], assets: assets)
     }
     public static func application(_ data: Data, resourceFork: Data? = nil) throws -> AppearanceImport {
-        guard digest(data) == referenceSHA256 else { throw AppearanceError.invalid("Unsupported application revision. Import the KDX Client 1.600 PowerPC reference or a version 1 .hap file.") }
+        let hash = digest(data), windows = hash == windowsReferenceSHA256
+        guard hash == referenceSHA256 || windows else { throw AppearanceError.invalid("Unsupported application revision. Import the verified KDX Client 1.600 PowerPC or Windows reference, or a version 1 .hap file.") }
         let b = try AssetBytes(data)
-        var result = try hap(b.data(0x10b380, 0x7d60), name: "Evil Chiaroscuro")
-        let offsets = [0x10add0,0x1095a8,0x109764,0x109930,0x109b00,0x109cd0,0x109e98,0x10a008,0x10a1c0,0x10a368,0x10a520,0x10a6e0,0x10a898,0x10aa60,0x10ac18]
+        var result = try hap(b.data(windows ? 0x1053a0 : 0x10b380, 0x7d60), name: "Evil Chiaroscuro")
+        let offsets = windows
+            ? [0x1034f8,0x101ce8,0x101ea3,0x10206a,0x10223a,0x10240a,0x1025cb,0x10273b,0x1028f3,0x102a99,0x102c51,0x102e0f,0x102fc7,0x10318b,0x103343]
+            : [0x10add0,0x1095a8,0x109764,0x109930,0x109b00,0x109cd0,0x109e98,0x10a008,0x10a1c0,0x10a368,0x10a520,0x10a6e0,0x10a898,0x10aa60,0x10ac18]
         let names = ["Alternate Romp", "Amber CRT", "Blue Jeans", "Blue Tram Café", "Bubblegum Crisis", "Chocolate Raspberry", "Mach Lavender", "Oxygen", "Sunset Chiaroscuro", "Techno Electric", "The Dream Scheme (Blue)", "The Dream Scheme (Green)", "The Dream Scheme (Purple)", "Tropical Water", "Turquoise Hilites"]
         for (offset, name) in zip(offsets, names) {
             let size = 2 + Int(b.bytes[offset]) * 3 + Int(b.bytes[offset+1])
@@ -117,12 +121,12 @@ public enum AppearanceDecoder {
             result.assets["palette-\(offset).dat"] = palette
         }
         var fonts: [Data] = []
-        for offset in [0xf8af0,0xfc720,0x101438,0x103a28] {
+        for offset in windows ? [0x10d100,0x110d30,0x115a48,0x118034] : [0xf8af0,0xfc720,0x101438,0x103a28] {
             let font = try b.data(offset,b.u32(offset+8))
             _ = try HaxialFont(data:font)
             fonts.append(font); result.assets["font-\(offset).fnt"] = font
         }
-        let chrome = try HAPChromeArtwork(reference: b)
+        let chrome = try windows ? HAPChromeArtwork(windowsClientReference:b) : HAPChromeArtwork(reference:b)
         for index in result.appearances.indices {
             result.appearances[index].fonts = fonts
             result.appearances[index].chromeArtwork = chrome
