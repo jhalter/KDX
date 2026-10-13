@@ -13,14 +13,13 @@ import KDXCore
     let submit: ClassicButton
     let cancel = ClassicButton("Cancel",key:"\u{1b}",height:20) {}
     let optionsButton = ClassicButton("Options…",height:20) {}
-    let challengeTable = ClassicButton("Challenge Table…") {}
     let optionsArea = ClassicSurface()
     private(set) var labels: [String:NSTextField] = [:]
     private(set) var optionsVisible = false
     private let initialEndpoint: ClassicEndpoint
     private var previousTracker: Bool
     var optionsChanged: (() -> Void)?
-    var preferredHeight: CGFloat { optionsVisible ? 330 : Self.referenceSize.height }
+    var preferredHeight: CGFloat { optionsVisible ? 294 : Self.referenceSize.height }
 
     init(endpoint: ClassicEndpoint, saving: Bool) {
         initialEndpoint = endpoint; previousTracker = endpoint.tracker
@@ -63,11 +62,10 @@ import KDXCore
             NSLayoutConstraint.activate([button.trailingAnchor.constraint(equalTo:trailingAnchor,constant:-right),button.topAnchor.constraint(equalTo:topAnchor,constant:y),button.widthAnchor.constraint(equalToConstant:width),button.heightAnchor.constraint(equalToConstant:height)])
         }
         place(optionsButton,x:10,y:161,width:110,height:20)
-        place(optionsArea,x:0,y:192,right:0,height:138)
+        place(optionsArea,x:0,y:192,right:0,height:102)
         label("Port",y:9,in:optionsArea); place(port,x:100,y:4,width:120,height:26,in:optionsArea)
         label("Nickname",y:39,in:optionsArea); place(nickname,x:100,y:34,right:10,height:26,in:optionsArea)
         place(autoJoin,x:98,y:70,right:10,height:22,in:optionsArea)
-        place(challengeTable,x:10,y:104,width:160,height:24,in:optionsArea)
         optionsButton.invoke = { [weak self] in guard let self else { return }; setOptionsVisible(!optionsVisible) }
         optionsArea.isHidden = true
         updateServiceControls(); updateKeyLoop()
@@ -88,7 +86,7 @@ import KDXCore
     func setOptionsVisible(_ visible: Bool) {
         guard visible != optionsVisible else { return }
         if !visible, let responder = window?.firstResponder,
-           responder === port.currentEditor() || responder === nickname.currentEditor() || responder === autoJoin || responder === challengeTable {
+           responder === port.currentEditor() || responder === nickname.currentEditor() || responder === autoJoin {
             window?.makeFirstResponder(optionsButton)
         }
         optionsVisible = visible; optionsArea.isHidden = !visible
@@ -98,7 +96,7 @@ import KDXCore
     }
     private func updateKeyLoop() {
         var controls: [NSView] = [type,name,host,login,password,optionsButton]
-        if optionsVisible { controls += [port,nickname,autoJoin,challengeTable] }
+        if optionsVisible { controls += [port,nickname,autoJoin] }
         controls += [cancel,submit]
         for (index,control) in controls.enumerated() { control.nextKeyView = controls[(index+1)%controls.count] }
     }

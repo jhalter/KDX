@@ -37,7 +37,7 @@ import KDXCore
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(_ model: ClassicServerModel) {
-        let setup = model.tableReady ? "Use the window menu to start the server or change settings." : "Challenge table required. Choose Challenge Table… from the window menu."
+        let setup = "Use the window menu to start the server or change settings."
         let log = model.server.log.map { "\($0.date.formatted(date:.omitted,time:.standard))  \($0.text)" }.joined(separator:"\n")
         var text = "KDX Server\n\(model.status)\n\(setup)\n"
         if !log.isEmpty { text += "\n"+log }

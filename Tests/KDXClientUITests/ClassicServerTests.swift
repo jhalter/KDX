@@ -104,30 +104,19 @@ final class ClassicServerTests: XCTestCase {
         XCTAssertNil(model.error)
         XCTAssertEqual(model.configuration.name,"Keep this configuration")
     }
-    @MainActor func testDownloadCancellationAndRetry() async throws {
+    @MainActor func testMissingBundledDataReportsInstallationErrorBeforeStarting() throws {
         let (_,prefs,root) = try fixture()
         defer { prefs.defaults.removePersistentDomain(forName:root.lastPathComponent); try? FileManager.default.removeItem(at:root) }
-        var attempts = 0, ready = false
-        let model = ClassicServerModel(configurationURL:root.appendingPathComponent("server.json"),tableLoader:{
-            guard ready else { throw KDXError.invalid("Missing table") }
-            return ChallengeTable(testBytes:[UInt8](repeating:7,count:1739))
-        },tableDownloader:{
-            attempts += 1
-            if attempts == 1 { try await Task.sleep(for:.seconds(30)) }
-            try Task.checkCancellation(); ready = true
-        })
+        let configuration = root.appendingPathComponent("server.json")
+        let message = "This installation is missing required authentication data. Reinstall the app."
+        let model = ClassicServerModel(configurationURL:configuration,tableLoader:{ try KDXStorage.loadTable(bundled:nil) })
         defer { model.shutdown() }
-        model.load(); XCTAssertFalse(model.tableReady)
-        model.downloadTable()
-        for _ in 0..<10 { await Task.yield() }
-        XCTAssertTrue(model.downloading); XCTAssertEqual(attempts,1)
-        model.downloadTable(); XCTAssertEqual(attempts,1)
-        model.cancelDownload()
-        for _ in 0..<10 { await Task.yield() }
-        XCTAssertFalse(model.downloading); XCTAssertFalse(model.tableReady); XCTAssertNil(model.error)
-        model.downloadTable()
-        for _ in 0..<10 { await Task.yield() }
-        XCTAssertEqual(attempts,2); XCTAssertTrue(model.tableReady); XCTAssertFalse(model.downloading)
+        model.load()
+        XCTAssertTrue(model.editable)
+        model.start()
+        XCTAssertEqual(model.error,message)
+        XCTAssertFalse(model.starting); XCTAssertFalse(model.server.isRunning)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:configuration.path))
     }
     @MainActor func testSettingsAndTrackerControlsSaveThroughTheModel() throws {
         _ = NSApplication.shared
@@ -182,7 +171,7 @@ final class ClassicServerTests: XCTestCase {
         let local = ClassicServerLocalWindow(model:model,preferences:prefs)
         let accounts = ClassicServerAccountsWindow(model:model,preferences:prefs)
         let users = ClassicServerUsersWindow(model:model,preferences:prefs)
-        let forms = [app.makeSettingsWindow(),app.makeTrackerWindow(),app.makeChallengeTableWindow(),app.makeAppearancesWindow(),accounts]
+        let forms = [app.makeSettingsWindow(),app.makeTrackerWindow(),app.makeAppearancesWindow(),accounts]
         for c in [console,local,users]+forms {
             c.chrome.layoutSubtreeIfNeeded()
             XCTAssertFalse(try XCTUnwrap(c.window).isVisible,"Headless tests never present a window")

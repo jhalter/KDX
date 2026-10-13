@@ -3,27 +3,31 @@ import XCTest
 @testable import KDXCore
 
 final class BundledTableTests: XCTestCase {
-    func testBundledTableAndExplicitImportPrecedence() throws {
+    func testMissingBundledDataReportsInstallationError() {
+        XCTAssertThrowsError(try KDXStorage.loadTable(bundled:nil)) { error in
+            XCTAssertEqual(error.localizedDescription,"This installation is missing required authentication data. Reinstall the app.")
+        }
+    }
+
+    func testDamagedOrUnreadableBundledDataReportsInstallationError() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:file) }
+        let message = "This installation's authentication data is damaged or unreadable. Reinstall the app."
+        XCTAssertThrowsError(try KDXStorage.loadTable(bundled:file)) { error in
+            XCTAssertEqual(error.localizedDescription,message)
+        }
+        try Data("damaged data".utf8).write(to:file)
+        XCTAssertThrowsError(try KDXStorage.loadTable(bundled:file)) { error in
+            XCTAssertEqual(error.localizedDescription,message)
+        }
+    }
+
+    func testVerifiedBundledDataLoadsAutomatically() throws {
         guard let path = ProcessInfo.processInfo.environment["KDX_TEST_TABLE"] else {
             throw XCTSkip("Set KDX_TEST_TABLE to a verified challenge-table.bin")
         }
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
-        defer { try? FileManager.default.removeItem(at:root) }
-        let bundled = root.appendingPathComponent("bundled.bin"), stored = root.appendingPathComponent("stored.bin")
-        let data = try Data(contentsOf:URL(fileURLWithPath:path))
-        try data.write(to:bundled)
-        let loaded = try KDXStorage.loadTable(stored:stored,bundled:bundled)
-        XCTAssertEqual(loaded.bytes,Array(data))
-        XCTAssertFalse(FileManager.default.fileExists(atPath:stored.path))
-        try Data("damaged import".utf8).write(to:stored)
-        XCTAssertThrowsError(try KDXStorage.loadTable(stored:stored,bundled:bundled))
-        try data.write(to:stored)
-        try Data("damaged bundle".utf8).write(to:bundled)
-        XCTAssertEqual(try KDXStorage.loadTable(stored:stored,bundled:bundled).bytes,Array(data))
-        XCTAssertEqual(try KDXStorage.loadTable(stored:stored,bundled:nil).bytes,Array(data))
-        try FileManager.default.removeItem(at:stored)
-        XCTAssertThrowsError(try KDXStorage.loadTable(stored:stored,bundled:bundled))
-        XCTAssertThrowsError(try KDXStorage.loadTable(stored:stored,bundled:nil))
+        let bundled = URL(fileURLWithPath:path)
+        let data = try Data(contentsOf:bundled)
+        XCTAssertEqual(try KDXStorage.loadTable(bundled:bundled).bytes,Array(data))
     }
 }

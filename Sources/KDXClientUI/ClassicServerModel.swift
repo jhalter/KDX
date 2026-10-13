@@ -8,24 +8,19 @@ import KDXCore
     let server: KDXServer
     private(set) var configuration = ServerConfiguration()
     private(set) var starting = false
-    private(set) var downloading = false
-    private(set) var tableReady = false
     private(set) var configurationError: String?
     var error: String?
     @ObservationIgnored private let configurationURL: URL
     @ObservationIgnored private let tableLoader: () throws -> ChallengeTable
-    @ObservationIgnored private let tableDownloader: () async throws -> Void
-    @ObservationIgnored private var downloadTask: Task<Void,Never>?
     @ObservationIgnored private var startTask: Task<Void,Never>?
     @ObservationIgnored private let observation = ClassicObservation()
     @ObservationIgnored private var wasRunning = false
     @ObservationIgnored private var lastServerError: String?
 
     init(server: KDXServer = KDXServer(), configurationURL: URL,
-         tableLoader: @escaping () throws -> ChallengeTable = { try KDXStorage.loadTable() },
-         tableDownloader: @escaping () async throws -> Void = { try await KDXStorage.downloadTable() }) {
+         tableLoader: @escaping () throws -> ChallengeTable = { try KDXStorage.loadTable() }) {
         self.server = server; self.configurationURL = configurationURL
-        self.tableLoader = tableLoader; self.tableDownloader = tableDownloader
+        self.tableLoader = tableLoader
     }
     var editable: Bool { !server.isRunning && !starting && configurationError == nil }
     var status: String {
@@ -39,7 +34,6 @@ import KDXCore
             if FileManager.default.fileExists(atPath:configurationURL.path) { configuration = try ServerConfiguration.load(from:configurationURL) }
             configurationError = nil
         } catch { configurationError = error.localizedDescription; self.error = error.localizedDescription }
-        refreshTable()
         observation.start { [weak self] in
             guard let self else { return }
             let running = server.isRunning
@@ -51,7 +45,6 @@ import KDXCore
             }
         }
     }
-    func refreshTable() { tableReady = (try? tableLoader()) != nil }
     func save(_ candidate: ServerConfiguration, replacing base: ServerConfiguration) throws {
         guard editable else { throw KDXError.invalid("Stop the server before changing local settings.") }
         guard configuration == base else { throw KDXError.invalid("Settings changed in another window or through remote administration. Close and reopen this window before saving.") }
@@ -62,11 +55,12 @@ import KDXCore
         configuration = candidate
     }
     func start() {
-        guard editable, !downloading else { return }
+        guard editable else { return }
         do {
+            let table = try tableLoader()
             try save(configuration,replacing:configuration)
-            let table = try tableLoader(), candidate = configuration
-            tableReady = true; starting = true; lastServerError = nil
+            let candidate = configuration
+            starting = true; lastServerError = nil
             startTask = Task { [weak self] in
                 guard let self else { return }
                 defer { starting = false; startTask = nil }
@@ -78,26 +72,14 @@ import KDXCore
                     if !Task.isCancelled, server.lastError != error.localizedDescription { self.error = error.localizedDescription }
                 }
             }
-        } catch { self.error = error.localizedDescription; refreshTable() }
+        } catch { self.error = error.localizedDescription }
     }
     func stop() {
         if server.isRunning || wasRunning { configuration = server.configuration }
         wasRunning = false
         startTask?.cancel(); server.stop()
     }
-    func downloadTable() {
-        guard !downloading, editable else { return }
-        downloading = true
-        downloadTask = Task { [weak self] in
-            guard let self else { return }
-            defer { downloading = false; downloadTask = nil; refreshTable() }
-            guard !Task.isCancelled else { return }
-            do { try await tableDownloader() }
-            catch { if !Task.isCancelled { self.error = error.localizedDescription } }
-        }
-    }
-    func cancelDownload() { downloadTask?.cancel() }
-    func shutdown() { observation.stop(); downloadTask?.cancel(); stop() }
+    func shutdown() { observation.stop(); stop() }
 
     static func localSettings(_ base: ServerConfiguration, login: String, password: String, confirmation: String, port: String) throws -> ServerConfiguration {
         guard let port = UInt16(port), port > 0 else { throw KDXError.invalid("Enter a port between 1 and 65535.") }

@@ -75,8 +75,6 @@ import KDXCore
         app.addItem(hide)
         app.addItem(.separator()); app.addItem(menuItem("Quit \(applicationName)", key: "q") { NSApplication.shared.terminate(nil) })
         let file = NSMenu(); file.addItem(menuItem("Connect…",key:"k") { [weak self] in self?.showConnect() }); file.addItem(menuItem("Address Book…",key:"b") { [weak self] in self?.showAddressBook() })
-        file.addItem(menuItem("Import Challenge Table…") { [weak self] in self?.importTable() })
-        file.addItem(menuItem("Download Challenge Table") { [weak self] in self?.bar.run("table") { try await KDXStorage.downloadTable(); self?.bar.showMessage("Challenge table is ready.") } })
         file.addItem(menuItem("Close Window",key:"w") { [weak self] in self?.activeController?.requestClose() })
         let edit = NSMenu()
         for (name, selector, key) in [("Undo",Selector(("undo:")),"z"),("Cut",#selector(NSText.cut(_:)),"x"),("Copy",#selector(NSText.copy(_:)),"c"),("Paste",#selector(NSText.paste(_:)),"v"),("Select All",#selector(NSText.selectAll(_:)),"a")] { edit.addItem(NSMenuItem(title:name,action:selector,keyEquivalent:key)) }
@@ -90,7 +88,13 @@ import KDXCore
         // A standalone borderless window keeps the HAP frame square; AppKit's
         // attached sheet presentation adds its own rounded frame.
         showUtility("about") {
-            let request = ClassicDialogRequest(title:applicationName,message:"AppKit client using KDXCore. Includes the original KDX themes, artwork and fonts. Visual fidelity is provisional.",cancelTitle:nil)
+            let request = ClassicDialogRequest(title:applicationName,message:"""
+                \(applicationName) v1.0.0
+                https://github.com/jhalter/kdx
+
+                Based on protocol reverse engineering work by Scott Anderson
+                https://github.com/scottanderson/kdx
+                """,cancelTitle:nil)
             let dialog = ClassicDialogController(request:request,preferences:preferences)
             dialog.responseRequested = { [weak dialog] _ in dialog?.window?.close() }
             return dialog
@@ -233,10 +237,6 @@ import KDXCore
             return
         }
         session.disconnect(); refreshBar()
-    }
-    func importTable() {
-        let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.message = "Select the original application, its ZIP archive, or challenge-table.bin."
-        panel.begin { [weak self] result in guard result == .OK, let url = panel.url, let self else { return }; bar.run("table") { try KDXStorage.importTable(from:url); self.bar.showMessage("Challenge table is ready.") } }
     }
     func showAppearances() {
         showUtility("appearances") { makeAppearanceWindow() }

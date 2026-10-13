@@ -10,7 +10,6 @@ extension ClassicApplication {
                 if let saving { try saving(endpoint) }
                 else { try self?.connect(endpoint:endpoint,password:password) }
             }
-            c.form.challengeTable.invoke = { [weak self] in self?.importTable() }
             return c
         }
     }

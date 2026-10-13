@@ -6,24 +6,17 @@ public enum KDXStorage {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         return root
     }
-    public static func tableURL() throws -> URL { try directory().appendingPathComponent("challenge-table.bin") }
     public static func loadTable() throws -> ChallengeTable {
-        try loadTable(stored:tableURL(),bundled:Bundle.main.url(forResource:"challenge-table",withExtension:"bin"))
+        try loadTable(bundled:Bundle.main.url(forResource:"challenge-table",withExtension:"bin"))
     }
-    static func loadTable(stored: URL, bundled: URL?) throws -> ChallengeTable {
-        // Keep explicit imports authoritative; use the build's verified table on a fresh install.
-        let source = FileManager.default.fileExists(atPath:stored.path) ? stored : (bundled ?? stored)
-        return try ChallengeTable(file:source)
-    }
-    public static func importTable(from file: URL) throws {
-        let scoped = file.startAccessingSecurityScopedResource()
-        defer { if scoped { file.stopAccessingSecurityScopedResource() } }
-        try ChallengeTable(file: file).save(to: tableURL())
-    }
-    public static func downloadTable() async throws {
-        let table = try await ChallengeTable.download()
-        try Task.checkCancellation()
-        try table.save(to: tableURL())
+    static func loadTable(bundled: URL?) throws -> ChallengeTable {
+        guard let bundled else {
+            throw KDXError.invalid("This installation is missing required authentication data. Reinstall the app.")
+        }
+        do { return try ChallengeTable(file:bundled) }
+        catch {
+            throw KDXError.invalid("This installation's authentication data is damaged or unreadable. Reinstall the app.")
+        }
     }
     public static func configurationURL() throws -> URL { try directory().appendingPathComponent("server.json") }
 }

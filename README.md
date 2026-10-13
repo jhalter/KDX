@@ -51,12 +51,12 @@ You can also open `Package.swift` in Xcode to work on the source.
 ### Connect or host
 
 1. Open KDX Client or KDX Server. The bundled challenge table is used automatically.
-   Existing manually imported tables take precedence. Import/download commands
-   remain available for development builds and recovery.
+   No authentication-data setup is needed. Missing or damaged bundled data is
+   reported as an installation error; rebuild or reinstall the app to repair it.
 2. To host, open KDX Server. Its window menu (also available as the macOS
    **Server** menu) provides **Settings** for administrator credentials and port,
-   **Server Settings…** for name/shared folder/guests, **Accounts…**, and
-   **Challenge Table…**. Choose **Start Server** when ready.
+   **Server Settings…** for name/shared folder/guests, and **Accounts…**.
+   Choose **Start Server** when ready.
 3. In KDX Client, open **Connect…** to browse the default Higher Intellect Tracker
    or connect directly to a server. Use `127.0.0.1` for a server on the same Mac;
    leave login and password blank for guest access.

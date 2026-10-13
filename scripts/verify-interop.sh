@@ -8,8 +8,8 @@ if [[ -z "${KDX_TEST_SERVER_HOST:-}" || -z "${KDX_TEST_TRACKER_HOST:-}" ]]; then
 Set KDX_TEST_SERVER_HOST and KDX_TEST_TRACKER_HOST to the independent KDX
 peers you want to test. This command opens network connections to both.
 Optional ports: KDX_TEST_SERVER_PORT (10700), KDX_TEST_TRACKER_PORT (10800).
-Set KDX_TEST_TABLE to an original challenge table or KDX_TEST_ARCHIVE to its
-original archive, or import a table through either app first.
+Set KDX_TEST_TABLE to .build/original-assets/challenge-table.bin after building
+the apps, or set KDX_TEST_ARCHIVE to a supported original program ZIP.
 Account credentials, if needed, use KDX_TEST_SERVER_LOGIN and
 KDX_TEST_SERVER_PASSWORD. Keep passwords out of command history and files.
 These gates verify TCP connectivity, server login, and tracker queries.

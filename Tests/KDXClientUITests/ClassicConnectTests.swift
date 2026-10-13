@@ -42,8 +42,8 @@ final class ClassicConnectTests: XCTestCase {
         XCTAssertTrue(form.optionsVisible); XCTAssertFalse(form.optionsArea.isHidden)
         XCTAssertTrue(form.optionsButton.nextKeyView === form.port)
         XCTAssertTrue(form.port.nextKeyView === form.nickname)
-        XCTAssertTrue(form.challengeTable.nextKeyView === form.cancel)
-        XCTAssertEqual(form.preferredHeight,330)
+        XCTAssertTrue(form.autoJoin.nextKeyView === form.cancel)
+        XCTAssertEqual(form.preferredHeight,294)
         form.port.stringValue = "12345"; form.nickname.stringValue = "Changed"
         form.optionsButton.performClick(nil)
         XCTAssertFalse(form.optionsVisible); XCTAssertTrue(form.optionsButton.nextKeyView === form.cancel)
@@ -98,7 +98,7 @@ final class ClassicConnectTests: XCTestCase {
                 }
                 if expanded {
                     XCTAssertTrue(form.bounds.contains(form.optionsArea.frame))
-                    for control in [form.port,form.nickname,form.autoJoin,form.challengeTable] {
+                    for control in [form.port,form.nickname,form.autoJoin] {
                         XCTAssertTrue(form.optionsArea.bounds.contains(control.frame))
                         XCTAssertFalse(control.hasAmbiguousLayout)
                     }

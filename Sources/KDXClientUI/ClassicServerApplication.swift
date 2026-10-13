@@ -45,7 +45,6 @@ import KDXCore
         observation.start { [weak self] in self?.refresh() }
         if appearances.allSatisfy({ $0.id == "recovery" }) { showAppearances() }
     }
-    public func applicationDidBecomeActive(_ notification: Notification) { model.refreshTable() }
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if let console { restore(console) }; return true
@@ -68,7 +67,7 @@ import KDXCore
     public func applicationWillTerminate(_ notification: Notification) { model.shutdown(); observation.stop() }
     private func refresh() {
         console.update(model)
-        for item in startItems { item.title = model.starting ? "Starting…" : "Start Server"; item.isEnabled = model.editable && model.tableReady && !model.downloading }
+        for item in startItems { item.title = model.starting ? "Starting…" : "Start Server"; item.isEnabled = model.editable }
         for item in stopItems { item.isEnabled = model.server.isRunning || model.starting }
         if let error = model.error { model.error = nil; console.showMessage(error,title:"KDX Server") }
     }
@@ -115,7 +114,6 @@ import KDXCore
         menu.addItem(menuItem("Tracker…") { [weak self] in self?.showTracker() })
         menu.addItem(menuItem("Accounts…") { [weak self] in self?.showAccounts() })
         menu.addItem(menuItem("User List") { [weak self] in self?.showUsers() })
-        menu.addItem(menuItem("Challenge Table…") { [weak self] in self?.showChallengeTable() })
         menu.addItem(menuItem("Appearances…") { [weak self] in self?.showAppearances() })
         return menu
     }
@@ -221,27 +219,6 @@ import KDXCore
     }
     private func showUsers() {
         show("users") { ClassicServerUsersWindow(model:model,preferences:preferences) }
-    }
-    private func showChallengeTable() { show("table") { makeChallengeTableWindow() } }
-    func makeChallengeTableWindow() -> ClassicServerFormWindow {
-        let c = form("Challenge Table",key:"table",height:220), status = serverNote("")
-        let importButton = ClassicButton("Import Challenge Table…") { [weak self, weak c] in
-            let panel = NSOpenPanel(); panel.message = "Select an original KDX program, ZIP archive, or challenge-table.bin."
-            panel.begin { [weak self, weak c] result in
-                guard result == .OK, let url = panel.url, let self, let c else { return }
-                guard model.editable, !model.downloading else { return }
-                do { try KDXStorage.importTable(from:url); model.refreshTable() } catch { c.showError(error) }
-            }
-        }
-        let download = ClassicButton("Download Challenge Table") { [weak self] in self?.model.downloadTable() }
-        let cancel = ClassicButton("Cancel Download") { [weak self] in self?.model.cancelDownload() }
-        c.observation.start { [weak self] in
-            guard let self else { return }
-            status.stringValue = model.downloading ? "Downloading…" : model.tableReady ? "Challenge table ready." : "A challenge table is required before starting the server."
-            importButton.isEnabled = model.editable && !model.downloading; download.isEnabled = importButton.isEnabled
-            cancel.isEnabled = model.downloading
-        }
-        c.setRows([status,importButton,download,cancel,serverNote("Download retrieves an original KDX archive from the Internet Archive. The table is shared with KDX Client.")]); return c
     }
     private func showAppearances() { show("appearance") { makeAppearancesWindow() } }
     func makeAppearancesWindow() -> ClassicServerFormWindow {
