@@ -222,7 +222,7 @@ import KDXCore
     }
     private func showAppearances() { show("appearance") { makeAppearancesWindow() } }
     func makeAppearancesWindow() -> ClassicServerFormWindow {
-        let c = form("Appearance",key:"appearance",height:280)
+        let c = form("Appearance",key:"appearance",height:250)
         let picker = ClassicPopUpButton("Appearance"), font = ClassicPopUpButton("Font")
         for a in appearances { picker.addItem(withTitle:a.name); picker.lastItem?.representedObject = a.id }
         picker.selectItem(at:appearances.firstIndex { $0.id == ClassicStyle.shared.appearance.id } ?? 0)
@@ -239,23 +239,7 @@ import KDXCore
         let save = ClassicButton("Save",key:"\r") { [weak c] in apply(); c?.requestClose() }
         let applyButton = ClassicButton("Apply",action:apply)
         let cancel = ClassicButton("Cancel",key:"\u{1b}") { [weak c] in c?.requestClose() }
-        let importButton = ClassicButton("Import Original KDX Server…") { [weak self, weak c] in
-            let panel = NSOpenPanel(); panel.message = "Select the original KDX Server 1.600 OSX app or KDXServer.exe."
-            panel.begin { [weak self, weak c] result in
-                guard result == .OK, let url = panel.url, let self, let c else { return }
-                do {
-                    let imported = try ClassicServerReference.load(url)
-                    try AppearanceLibrary(root:preferences.root.appendingPathComponent("ServerAppearances")).install(AppearanceImport(appearances:imported,assets:[:]))
-                    appearances = imported; ClassicStyle.shared.configureAssets(imported)
-                    picker.removeAllItems(); for a in appearances { picker.addItem(withTitle:a.name); picker.lastItem?.representedObject = a.id }
-                    picker.selectItem(at:appearances.firstIndex { $0.name == "Mach Lavender" } ?? 0)
-                    font.removeAllItems(); font.addItem(withTitle:"Default — Myoklonika 15")
-                    for choice in ClassicStyle.shared.fontChoices { font.addItem(withTitle:choice.title); font.lastItem?.representedObject = choice.id }
-                    apply()
-                } catch { c.showError(error) }
-            }
-        }
-        c.setRows([serverFieldRow("Appearance:",picker),serverFieldRow("Font:",font),serverNote("Original server palettes, bitmap controls and fonts. Server appearance and window locations are saved separately from the client."),importButton,classicRow([save,applyButton,cancel])])
+        c.setRows([serverFieldRow("Appearance:",picker),serverFieldRow("Font:",font),serverNote("Original server palettes, bitmap controls and fonts. Server appearance and window locations are saved separately from the client."),classicRow([save,applyButton,cancel])])
         c.window?.defaultButtonCell = save.cell as? NSButtonCell
         return c
     }
