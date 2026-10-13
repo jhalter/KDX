@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="Resources/AppIcon/AppIcon.png" alt="macOS KDX icon" width="128">
+  <img src="Resources/AppIcon/AppIcon.png" alt="KDX Client icon" width="128">
+  <img src="Resources/ServerIcon/ServerIcon.png" alt="KDX Server icon" width="128">
 </p>
 
 # macOS KDX
