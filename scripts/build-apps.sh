@@ -31,7 +31,8 @@ for product in KDXClient KDXServer; do
     # Replace the inode so rebuilding does not modify pages mapped by a running app.
     if [[ "${UNIVERSAL:-0}" == 1 ]]; then
         lipo -create "$bin_path/$product" "$cross_bin_path/$product" -output "$bundle/Contents/MacOS/.$product.new"
-        lipo -verify_arch arm64 x86_64 "$bundle/Contents/MacOS/.$product.new"
+        archs="$(lipo -archs "$bundle/Contents/MacOS/.$product.new")"
+        [[ "$archs" == 'x86_64 arm64' || "$archs" == 'arm64 x86_64' ]]
     else
         cp "$bin_path/$product" "$bundle/Contents/MacOS/.$product.new"
     fi

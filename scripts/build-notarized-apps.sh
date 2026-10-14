@@ -22,7 +22,8 @@ for product in KDXClient KDXServer; do
     case "$product" in KDXClient) title='KDX Client';; KDXServer) title='KDX Server';; esac
     app="$output/$title.app"
     ditto "dist/$title.app" "$app"
-    lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/$product"
+    archs="$(lipo -archs "$app/Contents/MacOS/$product")"
+    [[ "$archs" == 'x86_64 arm64' || "$archs" == 'arm64 x86_64' ]]
     [[ "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" == "$version" ]]
     codesign --force --options runtime --timestamp --sign "$identity" "$app"
     details="$(codesign -dvvv "$app" 2>&1)"
