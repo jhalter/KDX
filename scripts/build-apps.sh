@@ -6,10 +6,20 @@ if [[ $# -ne 1 || ! -f "$1" ]]; then
 fi
 original_archive="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 cd "$(dirname "$0")/.."
+version="${VERSION:-1.0b1}"
+build_number="${BUILD_NUMBER:-1}"
+[[ "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?((a|b|rc)[0-9]+)?$ ]] || { echo 'Invalid VERSION' >&2; exit 1; }
+[[ "$build_number" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid BUILD_NUMBER' >&2; exit 1; }
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache"
 swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local
 bin_path=$(swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local --show-bin-path)
+if [[ "${UNIVERSAL:-0}" == 1 ]]; then
+    case "$(uname -m)" in arm64) other_arch=x86_64;; x86_64) other_arch=arm64;; *) exit 1;; esac
+    cross_flags=(--triple "$other_arch-apple-macosx26.0" --scratch-path "$PWD/.build/universal/$other_arch")
+    swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local "${cross_flags[@]}"
+    cross_bin_path=$(swift build -c release --disable-sandbox --build-system native -debug-info-format none --cache-path "$PWD/.build/cache" --manifest-cache local "${cross_flags[@]}" --show-bin-path)
+fi
 assets="$PWD/.build/original-assets"
 "$bin_path/KDXAppearanceTool" export-all "$original_archive" "$assets"
 appearance_catalog="$assets/OriginalAppearances.json"
@@ -19,7 +29,12 @@ for product in KDXClient KDXServer; do
     bundle="dist/$title.app"
     mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/Notices"
     # Replace the inode so rebuilding does not modify pages mapped by a running app.
-    cp "$bin_path/$product" "$bundle/Contents/MacOS/.$product.new"
+    if [[ "${UNIVERSAL:-0}" == 1 ]]; then
+        lipo -create "$bin_path/$product" "$cross_bin_path/$product" -output "$bundle/Contents/MacOS/.$product.new"
+        lipo -verify_arch arm64 x86_64 "$bundle/Contents/MacOS/.$product.new"
+    else
+        cp "$bin_path/$product" "$bundle/Contents/MacOS/.$product.new"
+    fi
     mv -f "$bundle/Contents/MacOS/.$product.new" "$bundle/Contents/MacOS/$product"
     cp "$assets/challenge-table.bin" "$bundle/Contents/Resources/challenge-table.bin"
     cp Notices/*.txt "$bundle/Contents/Resources/Notices/"
@@ -45,8 +60,8 @@ for product in KDXClient KDXServer; do
 <key>CFBundleDisplayName</key><string>$title</string>
 $icon_plist
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>$version</string>
+<key>CFBundleVersion</key><string>$build_number</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to KDX servers and accept KDX client connections on your network.</string>

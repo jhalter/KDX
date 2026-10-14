@@ -101,8 +101,27 @@ Passing the default suite does not establish live interoperability.
 
 ## Software updates and releases
 
-The build script produces ad-hoc-signed local development apps. These are not
-notarized distribution releases.
+Download KDX Client and KDX Server separately from
+[GitHub Releases](https://github.com/jhalter/KDX/releases). Distribution ZIPs
+contain universal apps for Apple silicon and Intel, signed with Developer ID,
+notarized by Apple, and stapled for offline verification. Beta versions use tags
+such as `v1.0b1` and are marked as prereleases.
+
+The regular build script produces ad-hoc-signed local development apps. To build
+signed distribution archives with access to a Developer ID certificate and a
+`notarytool` keychain profile:
+
+```sh
+BUILD_NUMBER=1 scripts/build-notarized-apps.sh 1.0b1 "$HOME/Downloads/KDX_1.6_OSX_intel.7z"
+```
+
+Override `SIGN_IDENTITY` and `NOTARY_PROFILE` for a different signing account.
+The script builds both architectures, verifies the bundled assets, signs and
+notarizes each app, staples and validates the tickets, and checks Gatekeeper.
+It writes the two ZIPs, `SHA256SUMS.txt`, and notarization receipts under
+`dist/v1.0b1/`. It refuses to overwrite an existing candidate. After an
+interruption, inspect the retained receipts and Apple's submission history
+before resuming missing steps. Publishing to GitHub is a separate operation.
 
 ## License and credits
 
